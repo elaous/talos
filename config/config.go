@@ -4,7 +4,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
+	"strings"
 )
 
 // Endpoint is one model server. Backend "ollama" speaks Ollama's native API; "openai" speaks the
@@ -72,6 +76,54 @@ func Load(path string) (Config, error) {
 	return c, c.Validate()
 }
 
+// LoadEnv is Load followed by the TALOS_* environment overrides (see ApplyEnv).
+func LoadEnv(path string, getenv func(string) string) (Config, error) {
+	c, err := Load(path)
+	if err != nil {
+		return c, err
+	}
+	c.ApplyEnv(getenv)
+	if err := c.Validate(); err != nil {
+		return c, fmt.Errorf("invalid settings (the config file with the TALOS_* environment variables applied): %w", err)
+	}
+	return c, nil
+}
+
+// ApplyEnv overlays the few settings that differ between machines, so a container needs no edited JSON:
+//
+//	TALOS_LISTEN           listen address, e.g. ":8080"
+//	TALOS_ALLOWED_HOSTS    comma-separated bare Host names (no port), in addition to the loopback ones
+//	TALOS_LLM_BASE_URL     chat model server, e.g. "http://ollama:11434"
+//	TALOS_LLM_MODEL        default chat model
+//	TALOS_EMBED_BASE_URL   embedding model server
+//	TALOS_EMBED_MODEL      embedding model
+//
+// An unset or empty variable changes nothing; a set one overrides the file. LoadEnv validates the result.
+func (c *Config) ApplyEnv(getenv func(string) string) {
+	if v := getenv("TALOS_LISTEN"); v != "" {
+		c.Listen = v
+	}
+	if v := getenv("TALOS_ALLOWED_HOSTS"); v != "" {
+		for _, h := range strings.Split(v, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				c.AllowedHosts = append(c.AllowedHosts, h)
+			}
+		}
+	}
+	if v := getenv("TALOS_LLM_BASE_URL"); v != "" {
+		c.LLM.BaseURL = v
+	}
+	if v := getenv("TALOS_LLM_MODEL"); v != "" {
+		c.LLM.Model = v
+	}
+	if v := getenv("TALOS_EMBED_BASE_URL"); v != "" {
+		c.Embed.BaseURL = v
+	}
+	if v := getenv("TALOS_EMBED_MODEL"); v != "" {
+		c.Embed.Model = v
+	}
+}
+
 // Validate rejects settings that would misbehave rather than fail clearly.
 func (c Config) Validate() error {
 	if c.ChunkChars < 200 {
@@ -82,6 +134,23 @@ func (c Config) Validate() error {
 	}
 	if c.MaxSteps < 1 || c.MaxSteps > 20 {
 		return fmt.Errorf("max_steps must be between 1 and 20, got %d", c.MaxSteps)
+	}
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("listen %q must be host:port (for example 127.0.0.1:8080 or :8080): %w", c.Listen, err)
+	}
+	for name, e := range map[string]Endpoint{"llm": c.LLM.Endpoint, "embed": c.Embed} {
+		u, err := url.Parse(e.BaseURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%s base_url %q must be a URL such as http://localhost:11434", name, e.BaseURL)
+		}
+	}
+	for _, h := range c.AllowedHosts {
+		if h == "" || strings.ContainsAny(h, "/ \t") {
+			return fmt.Errorf("allowed_hosts entry %q must be a bare host name (no scheme, port or path)", h)
+		}
+		if _, err := netip.ParseAddr(strings.Trim(h, "[]")); err != nil && strings.Contains(h, ":") {
+			return fmt.Errorf("allowed_hosts entry %q must be a bare host name without a port: the Host header's port is ignored", h)
+		}
 	}
 	return nil
 }

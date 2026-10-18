@@ -1,0 +1,61 @@
+# Run talos in a container:
+#
+#   make docker-up        # builds the image, starts it on http://127.0.0.1:8080
+#
+# Works on a fresh clone with no setup: the PDF library and the index live in named volumes (talos-pdfs,
+# talos-data), which the container's user owns. Add PDFs with the UI's upload button. To use folders on the
+# host instead (./pdfs, ./data), add the override file:  make docker-up-host
+#
+# By default it talks to an Ollama running on the host (which must listen beyond loopback: OLLAMA_HOST=0.0.0.0).
+# To run Ollama in a container too:
+#
+#   OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up -d --build
+#   docker compose exec ollama ollama pull qwen2.5:7b-instruct && docker compose exec ollama ollama pull nomic-embed-text
+#
+# gojiberry (the UI framework, a private sibling module) is a named build context; point GOJIBERRY_DIR at it
+# if it is not ../gojiberry.
+
+services:
+  talos:
+    build:
+      context: .
+      additional_contexts:
+        gojiberry: ${GOJIBERRY_DIR:-../gojiberry}
+    image: talos:local
+    # The ONLY protection of the published port is that it is bound to this machine's loopback address: talos
+    # has no login, and allowed_hosts stops a browser on another site (DNS rebinding), not a client that sets its
+    # own Host header. Do not publish it on 0.0.0.0 without an authenticating proxy in front.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - talos-pdfs:/pdfs
+      - talos-data:/data
+      # - ./talos.docker.json:/etc/talos/talos.json:ro   # your own settings (see docker/talos.json)
+    environment:
+      TALOS_LLM_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      TALOS_EMBED_BASE_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      # TALOS_LLM_MODEL: qwen2.5:7b-instruct
+      # TALOS_EMBED_MODEL: nomic-embed-text
+      # TALOS_ALLOWED_HOSTS: talos.lan     # bare host names, no port; only if you put a proxy in front
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:0.40.6
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    # GPU: add `gpus: all` (NVIDIA container toolkit) or the device mapping your GPU needs.
+
+volumes:
+  talos-pdfs:
+  talos-data:
+  ollama:

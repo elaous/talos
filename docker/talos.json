@@ -1,0 +1,18 @@
+{
+  "listen": ":8080",
+  "allowed_hosts": ["localhost"],
+  "data_dir": "/data",
+  "pdf_dir": "/pdfs",
+  "ui_dir": "/app/ui",
+  "llm": {
+    "backend": "ollama",
+    "base_url": "http://host.docker.internal:11434",
+    "model": "qwen2.5:7b-instruct",
+    "temperature": 0.2
+  },
+  "embed": {
+    "backend": "ollama",
+    "base_url": "http://host.docker.internal:11434",
+    "model": "nomic-embed-text"
+  }
+}

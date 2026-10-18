@@ -242,7 +242,16 @@ func upload() {
 		case err != nil:
 			setNote("Upload failed: " + err.Error())
 		case !resp.OK:
-			setNote(fmt.Sprintf("Upload refused (HTTP %d): not a PDF, or too large.", resp.Status))
+			switch resp.Status {
+			case 503:
+				setNote("Uploads are disabled: the PDF folder is read-only. Search still works.")
+			case 413:
+				setNote("Upload refused: too large (64 MB at most).")
+			case 429:
+				setNote("Too many uploads at once: try again in a moment.")
+			default:
+				setNote(fmt.Sprintf("Upload refused (HTTP %d): not a PDF, or its name is not acceptable.", resp.Status))
+			}
 		default:
 			input.Set("value", "")
 			setNote("")

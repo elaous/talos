@@ -26,3 +26,21 @@ test:
 .PHONY: run
 run: ui build
 	./bin/talos serve
+
+# --- Docker (gojiberry is a named build context: see the Dockerfile) ---
+.PHONY: docker-build
+docker-build: ## build the image as talos:local (DOCKER_BUILD_FLAGS e.g. --secret id=cacert,src=ca.pem --build-arg HTTPS_PROXY=...)
+	docker build --build-context gojiberry=$(GOJIBERRY) $(DOCKER_BUILD_FLAGS) -t talos:local .
+
+.PHONY: docker-up
+docker-up: docker-build ## start on http://127.0.0.1:8080 (PDFs and index in named volumes)
+	GOJIBERRY_DIR=$(GOJIBERRY) docker compose up -d --no-build
+
+.PHONY: docker-up-host
+docker-up-host: docker-build ## like docker-up, but PDFs in ./pdfs and the index in ./data on the host
+	mkdir -p pdfs data
+	TALOS_UID=$$(id -u) TALOS_GID=$$(id -g) GOJIBERRY_DIR=$(GOJIBERRY) docker compose -f docker-compose.yml -f docker-compose.hostdirs.yml up -d --no-build
+
+.PHONY: docker-down
+docker-down:
+	docker compose down

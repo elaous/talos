@@ -1,0 +1,11 @@
+.git
+.github
+bin
+data
+pdfs
+ui/dist
+talos.json
+*.md
+!README.md
+Dockerfile
+docker-compose.yml

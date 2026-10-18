@@ -4,6 +4,9 @@
 //	talos [-c talos.json] serve            web UI + API (default)
 //	talos [-c talos.json] ingest           index the PDFs
 //	talos [-c talos.json] ask "question"   one-shot, steps on stderr
+//	talos [-c talos.json] healthcheck      exit 0 if the server answers (for container health checks)
+//
+// TALOS_* environment variables override a few settings; see config.Config.ApplyEnv.
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,9 +42,36 @@ func main() {
 }
 
 func run(cfgPath string, args []string) error {
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.LoadEnv(cfgPath, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("%s: %w", cfgPath, err)
+	}
+	if len(args) > 0 && args[0] == "healthcheck" { // light: no model clients, no index
+		u, err := healthURL(cfg.Listen)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return checkHealth(ctx, u)
+	}
+	cmd := "serve"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	switch cmd { // fail at the start, with a clear message, rather than at the first upload or ingest
+	case "serve":
+		if err := checkWritable(cfg.DataDir); err != nil { // the index must be written
+			return err
+		}
+		// A PDF folder mounted read-only still serves searches: only uploads need to write there.
+		if err := checkWritable(cfg.PDFDir); err != nil {
+			log.Printf("warning: uploads will not work: %v", err)
+		}
+	case "ingest":
+		if err := checkWritable(cfg.DataDir); err != nil {
+			return err
+		}
 	}
 	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature, cfg.LLM.NumCtx)
 	if err != nil {
@@ -53,10 +84,6 @@ func run(cfgPath string, args []string) error {
 	lib, err := rag.Open(filepath.Join(cfg.DataDir, "index.gob"), emb, cfg.Embed.Backend+":"+cfg.Embed.Model, cfg.ChunkChars, cfg.ChunkOverlap)
 	if err != nil {
 		return err
-	}
-	cmd := "serve"
-	if len(args) > 0 {
-		cmd = args[0]
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -110,14 +137,17 @@ func run(cfgPath string, args []string) error {
 		s.Wait() // an ingest in progress saves what it finished before the process exits
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (serve, ingest, ask)", cmd)
+	return fmt.Errorf("unknown command %q (serve, ingest, ask, healthcheck)", cmd)
 }
 
 // allowedHosts is the set of Host names the server answers to: the listen host, loopback and any configured
 // names. A wildcard listen address (0.0.0.0, ::, or just a port) needs allowed_hosts: without a list the Host
 // check would be off, and with no login that is what makes DNS rebinding work.
 func allowedHosts(cfg config.Config) ([]string, error) {
-	hosts := append([]string(nil), cfg.AllowedHosts...)
+	var hosts []string
+	for _, h := range cfg.AllowedHosts {
+		hosts = append(hosts, strings.Trim(h, "[]")) // the server compares against the Host header's bracket-free name
+	}
 	h, _, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("listen %q: %w", cfg.Listen, err)
