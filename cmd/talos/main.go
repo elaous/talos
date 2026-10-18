@@ -4,6 +4,9 @@
 //	talos [-c talos.json] serve            web UI + API (default)
 //	talos [-c talos.json] ingest           index the PDFs
 //	talos [-c talos.json] ask "question"   one-shot, steps on stderr
+//	talos [-c talos.json] healthcheck      exit 0 if the server answers (for container health checks)
+//
+// TALOS_* environment variables override a few settings; see config.Config.ApplyEnv.
 package main
 
 import (
@@ -38,9 +41,18 @@ func main() {
 }
 
 func run(cfgPath string, args []string) error {
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.LoadEnv(cfgPath, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("%s: %w", cfgPath, err)
+	}
+	if len(args) > 0 && args[0] == "healthcheck" { // light: no model clients, no index
+		u, err := healthURL(cfg.Listen)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return checkHealth(ctx, u)
 	}
 	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature, cfg.LLM.NumCtx)
 	if err != nil {

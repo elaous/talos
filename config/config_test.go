@@ -32,3 +32,31 @@ func TestLoadDefaultsAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyEnv(t *testing.T) {
+	env := map[string]string{
+		"TALOS_LISTEN": ":8080", "TALOS_ALLOWED_HOSTS": " talos.lan , ,box.local", "TALOS_LLM_BASE_URL": "http://ollama:11434",
+		"TALOS_LLM_MODEL": "m1", "TALOS_EMBED_BASE_URL": "http://emb:1", "TALOS_EMBED_MODEL": "e1",
+	}
+	c, err := LoadEnv(filepath.Join(t.TempDir(), "missing.json"), func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":8080" || c.LLM.BaseURL != "http://ollama:11434" || c.LLM.Model != "m1" || c.Embed.BaseURL != "http://emb:1" || c.Embed.Model != "e1" {
+		t.Fatalf("%+v", c)
+	}
+	if strings.Join(c.AllowedHosts, ",") != "talos.lan,box.local" {
+		t.Fatalf("allowed hosts: %q", c.AllowedHosts)
+	}
+	// unset and empty variables change nothing, and the file's values are the base
+	p := filepath.Join(t.TempDir(), "t.json")
+	os.WriteFile(p, []byte(`{"llm":{"model":"from-file","base_url":"http://file:1"}}`), 0o644)
+	c, _ = LoadEnv(p, func(k string) string { return map[string]string{"TALOS_LLM_MODEL": ""}[k] })
+	if c.LLM.Model != "from-file" || c.LLM.BaseURL != "http://file:1" {
+		t.Fatalf("%+v", c.LLM)
+	}
+	c, _ = LoadEnv(p, func(k string) string { return map[string]string{"TALOS_LLM_MODEL": "env"}[k] })
+	if c.LLM.Model != "env" || c.LLM.BaseURL != "http://file:1" {
+		t.Fatalf("the environment did not override only what it names: %+v", c.LLM)
+	}
+}

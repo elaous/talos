@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Endpoint is one model server. Backend "ollama" speaks Ollama's native API; "openai" speaks the
@@ -70,6 +71,51 @@ func Load(path string) (Config, error) {
 		return c, err
 	}
 	return c, c.Validate()
+}
+
+// LoadEnv is Load followed by the TALOS_* environment overrides (see ApplyEnv).
+func LoadEnv(path string, getenv func(string) string) (Config, error) {
+	c, err := Load(path)
+	if err != nil {
+		return c, err
+	}
+	c.ApplyEnv(getenv)
+	return c, c.Validate()
+}
+
+// ApplyEnv overlays the few settings that differ between machines, so a container needs no edited JSON:
+//
+//	TALOS_LISTEN           listen address, e.g. ":8080"
+//	TALOS_ALLOWED_HOSTS    comma-separated Host names, in addition to the loopback ones
+//	TALOS_LLM_BASE_URL     chat model server, e.g. "http://ollama:11434"
+//	TALOS_LLM_MODEL        default chat model
+//	TALOS_EMBED_BASE_URL   embedding model server
+//	TALOS_EMBED_MODEL      embedding model
+//
+// An unset or empty variable changes nothing.
+func (c *Config) ApplyEnv(getenv func(string) string) {
+	if v := getenv("TALOS_LISTEN"); v != "" {
+		c.Listen = v
+	}
+	if v := getenv("TALOS_ALLOWED_HOSTS"); v != "" {
+		for _, h := range strings.Split(v, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				c.AllowedHosts = append(c.AllowedHosts, h)
+			}
+		}
+	}
+	if v := getenv("TALOS_LLM_BASE_URL"); v != "" {
+		c.LLM.BaseURL = v
+	}
+	if v := getenv("TALOS_LLM_MODEL"); v != "" {
+		c.LLM.Model = v
+	}
+	if v := getenv("TALOS_EMBED_BASE_URL"); v != "" {
+		c.Embed.BaseURL = v
+	}
+	if v := getenv("TALOS_EMBED_MODEL"); v != "" {
+		c.Embed.Model = v
+	}
 }
 
 // Validate rejects settings that would misbehave rather than fail clearly.

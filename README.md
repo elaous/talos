@@ -27,6 +27,33 @@ make run                      # builds the WASM UI + server, serves http://127.0
 
 PDFs can also be uploaded in the UI. Indexing is incremental (unchanged files are skipped, removed files dropped).
 
+## Docker
+
+```bash
+git clone … talos && git clone … gojiberry   # gojiberry (private) next to talos
+cd talos
+make docker-up                                # builds, then http://127.0.0.1:8080 ; PDFs in ./pdfs, index in ./data
+```
+
+`make docker-up` creates `./pdfs` and `./data`, runs the container as your user (so uploads and the index are
+yours), and builds with gojiberry as a named build context (`GOJIBERRY_DIR`, default `../gojiberry`). The image
+is small (~33 MB, distroless, non-root), runs with a read-only root filesystem and no capabilities, and has a
+health check. Without compose: `docker build --build-context gojiberry=../gojiberry -t talos .`
+
+- **Models.** By default it talks to an Ollama on the host: that Ollama must listen beyond loopback
+  (`OLLAMA_HOST=0.0.0.0`). To run Ollama in a container as well:
+  `OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up --build`, then
+  `docker compose exec ollama ollama pull qwen2.5:7b-instruct` (and `nomic-embed-text`). Any OpenAI-compatible
+  server works too: mount your own config over `/etc/talos/talos.json` (start from `docker/talos.json`).
+- **Settings without editing JSON:** `TALOS_LLM_BASE_URL`, `TALOS_LLM_MODEL`, `TALOS_EMBED_BASE_URL`,
+  `TALOS_EMBED_MODEL`, `TALOS_ALLOWED_HOSTS`, `TALOS_LISTEN`.
+- **Reachability.** The port is published on `127.0.0.1` only, because talos has no login. To reach it from
+  elsewhere, put an authenticating proxy in front and add the name you use to `TALOS_ALLOWED_HOSTS` (talos
+  refuses to listen on all interfaces without an allow-list; the image is configured that way and relies on the
+  published port being loopback).
+- **Behind a TLS-intercepting proxy** (corporate): pass the proxy CA and address at build time only:
+  `make docker-build DOCKER_BUILD_FLAGS="--secret id=cacert,src=ca.pem --build-arg HTTPS_PROXY=http://proxy:3128"`.
+
 ## Models: Ollama and Hugging Face
 
 Copy `talos.example.json` to `talos.json`. Each agent can use its own model (`llm.models`).
@@ -81,5 +108,5 @@ scripted in tests, so no model is needed.
 
 ## Layout
 
-`config/` settings · `llm/` Ollama + OpenAI-compatible clients · `rag/` PDF chunking, embeddings, search ·
+`Dockerfile`, `docker-compose.yml`, `docker/` container setup · `config/` settings · `llm/` Ollama + OpenAI-compatible clients · `rag/` PDF chunking, embeddings, search ·
 `web/` search & fetch · `agent/` tool loop and the team · `server/` API + static UI · `ui/` the xango app (`main.xg`).
