@@ -274,3 +274,47 @@ func TestToolCallsStayValidJSONInHistoryButLongArgsAreCut(t *testing.T) {
 		t.Fatalf("long argument not cut, or short ones lost: %d %v", len(prev), m)
 	}
 }
+
+func TestShortenCallCutsNestedValuesAndBoundsTheToolName(t *testing.T) {
+	long := strings.Repeat("n", 3000)
+	call := map[string]any{"tool": strings.Repeat("t", 900), "args": map[string]any{
+		"notes": []any{long, "short", map[string]any{"deep": long}}, "k": 3.0}}
+	out := shortenCall(call)
+	if len(out) > 1500 {
+		t.Fatalf("%d bytes kept", len(out))
+	}
+	m, ok := ExtractJSON(out)
+	if !ok {
+		t.Fatalf("not valid JSON: %q", out)
+	}
+	args := m["args"].(map[string]any)
+	if args["k"] != 3.0 || args["notes"].([]any)[1] != "short" {
+		t.Fatalf("short values changed: %v", args)
+	}
+	// a non-object args value is kept (cut), not dropped
+	if m, _ := ExtractJSON(shortenCall(map[string]any{"tool": "t", "args": long})); len(m["args"].(string)) > 600 {
+		t.Fatal("string args not cut")
+	}
+}
+
+func TestDelegatedTasksAreBounded(t *testing.T) {
+	huge := strings.Repeat("n", maxTaskChars*3)
+	s := &script{replies: []string{
+		`{"tool":"ask_writer","args":{"task":"` + huge + `"}}`, // supervisor passes huge notes
+		`{"final":"written"}`, // writer
+		`{"final":"done"}`,    // supervisor
+	}}
+	var cfg config.Config
+	if _, err := NewTeam(cfg, s, &rag.Library{}, web.New("", false)).Ask(context.Background(), "q", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var task string
+	for _, m := range s.seen[1] { // the writer's conversation
+		if m.Role == "user" {
+			task = m.Content
+		}
+	}
+	if len(task) > maxTaskChars+100 || !strings.Contains(task, "task cut") {
+		t.Fatalf("the writer received %d characters", len(task))
+	}
+}

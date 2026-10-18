@@ -13,6 +13,9 @@ import (
 	"github.com/elaous/talos/web"
 )
 
+// maxTaskChars bounds what one agent hands another: about a third of the context an agent may use.
+const maxTaskChars = 16000
+
 func str(args map[string]any, k string) string {
 	switch v := args[k].(type) {
 	case string:
@@ -146,7 +149,11 @@ func (t *Team) Ask(ctx context.Context, question string, history []llm.Message, 
 		return Tool{Name: "ask_" + a.Name, Description: what,
 			Args: map[string]string{"task": "string: a self-contained question or instruction"},
 			Run: func(ctx context.Context, args map[string]any) (string, error) {
-				return a.Run(ctx, str(args, "task"), nil)
+				task := str(args, "task")
+				if len(task) > maxTaskChars { // a model-written task (the writer's notes) must not fill the whole context
+					task = strings.ToValidUTF8(task[:maxTaskChars], "") + "\n[task cut: too long]"
+				}
+				return a.Run(ctx, task, nil)
 			}}
 	}
 	pdf := mk("pdf_researcher", "You are a meticulous researcher of a library of PDF documents. Search with several "+

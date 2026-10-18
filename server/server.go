@@ -43,9 +43,10 @@ type Server struct {
 	// Empty means "any": only correct when the server is meant to be reached by other names (see config).
 	AllowedHosts []string
 	// Ctx ends the server's background work (indexing). Nil means it never ends.
-	Ctx context.Context
-	wg  sync.WaitGroup // background ingests
-	up  chan struct{}  // limits concurrent uploads, which are buffered in memory
+	Ctx     context.Context
+	wg      sync.WaitGroup // background ingests
+	up      chan struct{}  // limits concurrent uploads, which are buffered in memory
+	writeMu sync.Mutex     // one upload writes into the library at a time
 
 	mu       sync.Mutex
 	jobs     map[string]*job
@@ -96,6 +97,7 @@ type job struct {
 func (s *Server) Handler() http.Handler {
 	s.jobs = map[string]*job{}
 	s.up = make(chan struct{}, maxUploads)
+	removeStaleBackups(s.PDFDir)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ask", s.ask)
 	mux.HandleFunc("GET /api/jobs/{id}", s.poll)
@@ -439,7 +441,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := writeAll(s.PDFDir, files); err != nil {
+	s.writeMu.Lock()
+	err = writeAll(s.PDFDir, files)
+	s.writeMu.Unlock()
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -447,12 +452,18 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// rename is os.Rename; tests replace it to make a late rename fail.
+// rename is os.Rename; tests replace it to make a late rename fail or to look at the state between steps.
 var rename = os.Rename
 
-// writeAll saves every file or none. Destinations are checked first and all data goes to temporary names; then
-// each file is renamed into place, with a file that already exists moved aside to a backup first. If any step
-// fails, the files created so far are removed and the backups put back, so the library is as it was.
+// backupSuffix marks the copy of a file that an upload is about to replace.
+const backupSuffix = ".replaced~"
+
+// writeAll saves every file or none, and a file that is replaced is never missing, even if the process is killed
+// half way: destinations are checked first, all data goes to temporary names, each existing destination gets a
+// hard-linked (else copied) backup, and then every temporary file is renamed over its destination, which is
+// atomic. If any step fails, the files created so far are removed and the backups put back; on success the
+// backups are deleted. A backup left behind by a crash is harmless (the original is still in place) and is
+// removed when the server starts.
 func writeAll(dir string, files map[string][]byte) error {
 	type tmp struct{ from, to, backup string }
 	var done []tmp
@@ -482,38 +493,61 @@ func writeAll(dir string, files map[string][]byte) error {
 			return werr
 		}
 	}
-	var moved []tmp // renamed into place so far
+	var placed []tmp // destinations already replaced or created
 	undo := func() {
-		for i := len(moved) - 1; i >= 0; i-- {
-			t := moved[i]
-			os.Remove(t.to)
+		for i := len(placed) - 1; i >= 0; i-- {
+			if t := placed[i]; t.backup != "" {
+				_ = rename(t.backup, t.to) // atomically puts the old file back
+			} else {
+				os.Remove(t.to)
+			}
+		}
+		for _, t := range done {
 			if t.backup != "" {
-				_ = rename(t.backup, t.to)
+				os.Remove(t.backup)
 			}
 		}
 		cleanup()
 	}
-	for _, t := range done {
-		if _, err := os.Lstat(t.to); err == nil { // replacing: keep the old file until everything has worked
-			t.backup = t.to + ".replaced~"
-			if err := rename(t.to, t.backup); err != nil {
-				undo()
-				return err
+	for i := range done {
+		t := &done[i]
+		if _, err := os.Lstat(t.to); err == nil {
+			t.backup = t.to + backupSuffix
+			os.Remove(t.backup)
+			if err := os.Link(t.to, t.backup); err != nil { // no hard links here: copy
+				old, rerr := os.ReadFile(t.to)
+				if rerr == nil {
+					rerr = os.WriteFile(t.backup, old, 0o644)
+				}
+				if rerr != nil {
+					t.backup = ""
+					undo()
+					return rerr
+				}
 			}
 		}
 		if err := rename(t.from, t.to); err != nil {
 			if t.backup != "" {
-				_ = rename(t.backup, t.to)
+				os.Remove(t.backup)
+				t.backup = ""
 			}
 			undo()
 			return err
 		}
-		moved = append(moved, t)
+		placed = append(placed, *t)
 	}
-	for _, t := range moved {
+	for _, t := range placed {
 		if t.backup != "" {
 			os.Remove(t.backup)
 		}
 	}
 	return nil
+}
+
+// removeStaleBackups deletes backups that a crashed upload left behind.
+func removeStaleBackups(dir string) {
+	old, _ := filepath.Glob(filepath.Join(dir, "*"+backupSuffix))
+	for _, p := range old {
+		os.Remove(p)
+	}
 }

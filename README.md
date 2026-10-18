@@ -50,12 +50,15 @@ scripted in tests, so no model is needed.
   `Origin`), and non-JSON asks. Listening on all interfaces (`0.0.0.0`, `::`, `:8080`) needs `allowed_hosts`
   (the names you reach it by; talos refuses to start otherwise). It still has no login: put it behind
   something that authenticates if others can reach it.
-- **Web access.** `fetch_url` refuses loopback, LAN, link-local, CGNAT and cloud-metadata addresses (checked at
-  connect time, so redirects and DNS tricks do not help). `HTTP(S)_PROXY` is honoured: each target is
-  resolved and checked before it is handed to the proxy (which is trusted and may be on your LAN), leaving only
-  the small window in which the proxy resolves the name again. It opens only URLs from your message or from
-  search results, so a hostile page cannot make the model request an attacker URL carrying private text.
-  `web.allow_private` lifts the address check; a SearXNG on localhost works without it.
+- **Web access.** `fetch_url` refuses loopback, LAN, link-local, CGNAT and cloud-metadata addresses. Without
+  a proxy this is checked on the address actually connected to, so redirects and DNS tricks do not help. With
+  `HTTP(S)_PROXY` set the proxy is dialled instead, so the target is resolved and checked first, and that is
+  **best-effort only**: the proxy resolves the name again, and a hostile DNS server can answer the two
+  lookups differently, so what the LAN exposes through the proxy depends on the proxy. (A name only the
+  proxy can resolve is passed on to it.) The proxy's own address is the one exempt connection, and it is
+  never a fetch target itself, not directly and not through a redirect. `fetch_url` opens only URLs from
+  your message or from search results, so a hostile page cannot make the model request an attacker URL
+  carrying private text. `web.allow_private` lifts the address check; a SearXNG on localhost works without it.
 - **Search queries leave the machine.** A model steered by hostile text could put private PDF text into a
   `web_search` query. That is inherent to giving an agent both your documents and web search. Use a local
   SearXNG, or set `"web": {"disabled": true}` to drop the web researcher entirely so nothing leaves the machine.

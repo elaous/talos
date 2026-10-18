@@ -126,3 +126,91 @@ func TestProxyEnvironmentAppliesWhenPrivateAllowed(t *testing.T) {
 		t.Fatalf("%q %v %v", got, err, *seen)
 	}
 }
+
+func setProxy(t *testing.T, url string) {
+	t.Helper()
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
+		t.Setenv(k, url)
+	}
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+}
+
+func TestZonedIPv6AddressesAreStillChecked(t *testing.T) {
+	for _, ip := range []string{"64:ff9b:1::1%lo", "2001::1%lo", "fe80::1%eth0", "::1%lo", "::ffff:10.0.0.1%lo"} {
+		if !BlockedIP(netip.MustParseAddr(ip)) {
+			t.Errorf("%s was not blocked", ip)
+		}
+	}
+	if BlockedIP(netip.MustParseAddr("2606:4700:4700::1111%lo")) {
+		t.Error("a public zoned address was blocked")
+	}
+}
+
+// The proxy's own address is dialled unchecked, because it is usually on the LAN. That exemption must not be
+// reachable as a fetch target: not directly, not by another spelling, and not through a redirect.
+func TestProxyAddressIsNotAFetchTarget(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	var proxy *httptest.Server
+	proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.String())
+		mu.Unlock()
+		if r.URL.String() == "http://203.0.113.9/redirect" { // a "public" page that redirects to the proxy's admin port
+			http.Redirect(w, r, proxy.URL+"/admin/secret", http.StatusFound)
+			return
+		}
+		w.Write([]byte("<p>proxy admin page</p>"))
+	}))
+	defer proxy.Close()
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	addr := strings.TrimPrefix(proxy.URL, "http://")
+	port := addr[strings.LastIndex(addr, ":")+1:]
+
+	for _, u := range []string{"http://" + addr + "/admin", "http://localhost:" + port + "/admin", "http://LOCALHOST:" + port + "/admin", "http://127.0.0.1:" + port + "/"} {
+		if got, err := c.Fetch(context.Background(), u, 100); err == nil {
+			t.Errorf("%s fetched the proxy itself: %q", u, got)
+		}
+	}
+	if _, err := c.Fetch(context.Background(), "http://203.0.113.9/redirect", 100); err == nil {
+		t.Error("a redirect to the proxy's own address was followed")
+	}
+	// the exemption is for the proxy alone: any other loopback server is still refused
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<p>other</p>")) }))
+	defer other.Close()
+	if got, err := c.Fetch(context.Background(), other.URL, 100); err == nil || !strings.Contains(err.Error(), "private address") {
+		t.Errorf("another loopback server was reachable: %q %v", got, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range seen {
+		if strings.Contains(s, "admin") {
+			t.Errorf("the proxy's admin page was requested: %v", seen)
+		}
+	}
+}
+
+// A proxy named by hostname (the usual corporate setup) must work even though its address is private.
+func TestProxyGivenByHostnameWorks(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	addr := strings.TrimPrefix(proxy.URL, "http://")
+	setProxy(t, "http://localhost:"+addr[strings.LastIndex(addr, ":")+1:])
+	c := New("", false)
+	if got, err := c.Fetch(context.Background(), "http://203.0.113.9/x", 100); err != nil || got != "via proxy" || len(*seen) != 1 {
+		t.Fatalf("hostname proxy: %q %v %v", got, err, *seen)
+	}
+	// and it is still the only thing exempt: a private target is refused before reaching it
+	if _, err := c.Fetch(context.Background(), "http://10.0.0.5/", 100); err == nil || len(*seen) != 1 {
+		t.Fatalf("private target through a hostname proxy: %v %v", err, *seen)
+	}
+}
+
+func TestNameOnlyTheProxyCanResolvePassesThrough(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	setProxy(t, proxy.URL)
+	if got, err := New("", false).Fetch(context.Background(), "http://intranet.corp.invalid/page", 100); err != nil || got != "via proxy" || len(*seen) != 1 {
+		t.Fatalf("%q %v %v", got, err, *seen)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -631,4 +632,113 @@ func TestNoIndexingStartsAfterWait(t *testing.T) {
 		t.Fatal("indexing started after Wait")
 	}
 	s.wg.Wait() // would hang or race if StartIngest had Added
+}
+
+// While an upload replaces a file, the old file must exist at every moment a crash could happen.
+func TestReplacingAFileNeverLeavesItMissing(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "doc.pdf")
+	os.WriteFile(old, []byte("%PDF-1.4 OLD"), 0o644)
+	var inFlight []string
+	rename = func(a, b string) error {
+		if b == old { // the moment the new file takes over
+			got, err := os.ReadFile(old)
+			inFlight = append(inFlight, fmt.Sprintf("%q %v", got, err))
+			if err != nil || string(got) != "%PDF-1.4 OLD" {
+				t.Errorf("the destination was missing or changed before the replacing rename: %q %v", got, err)
+			}
+		}
+		return os.Rename(a, b)
+	}
+	defer func() { rename = os.Rename }()
+	if err := writeAll(dir, map[string][]byte{"doc.pdf": []byte("%PDF-1.4 NEW")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(inFlight) != 1 {
+		t.Fatalf("rename hook saw %v", inFlight)
+	}
+	if b, _ := os.ReadFile(old); string(b) != "%PDF-1.4 NEW" {
+		t.Fatalf("not replaced: %q", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*"+backupSuffix)); len(left) != 0 {
+		t.Fatalf("backup left: %v", left)
+	}
+}
+
+func TestStaleBackupsAreRemovedAtStartup(t *testing.T) {
+	var cfg config.Config
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "x.pdf"), []byte("%PDF-1.4 x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "x.pdf"+backupSuffix), []byte("%PDF-1.4 old"), 0o644)
+	s := &Server{Team: agent.NewTeam(cfg, final("x"), &rag.Library{}, web.New("", false)), Lib: &rag.Library{}, PDFDir: dir,
+		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
+	s.Handler()
+	if _, err := os.Stat(filepath.Join(dir, "x.pdf"+backupSuffix)); err == nil {
+		t.Fatal("stale backup kept")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "x.pdf")); err != nil {
+		t.Fatal("the real file was removed")
+	}
+}
+
+func TestConcurrentUploadsOfOneNameEndInAConsistentState(t *testing.T) {
+	h, s := hostServer(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 20; n++ {
+				ct, body := multipartBody([][2]string{{"same.pdf", fmt.Sprintf("%%PDF-1.4 writer-%d", i)}})
+				req(h, "POST", "/api/upload", "x", nil, ct, body)
+			}
+		}(i)
+	}
+	wg.Wait()
+	b, err := os.ReadFile(filepath.Join(s.PDFDir, "same.pdf"))
+	if err != nil || (string(b) != "%PDF-1.4 writer-0" && string(b) != "%PDF-1.4 writer-1") {
+		t.Fatalf("%q %v", b, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.PDFDir, "*"+backupSuffix)); len(left) != 0 {
+		t.Fatalf("backups left: %v", left)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.PDFDir, ".upload-*")); len(left) != 0 {
+		t.Fatalf("temp files left: %v", left)
+	}
+}
+
+// Two uploads must not be inside writeAll at the same time: they would share backup names. The rename hook
+// holds each writer long enough for an unserialized second one to arrive, and records the overlap.
+func TestUploadsAreSerializedIntoTheLibrary(t *testing.T) {
+	h, s := hostServer(t)
+	var active, peak atomic.Int32
+	rename = func(a, b string) error {
+		n := active.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		active.Add(-1)
+		return os.Rename(a, b)
+	}
+	defer func() { rename = os.Rename }()
+	os.WriteFile(filepath.Join(s.PDFDir, "same.pdf"), []byte("%PDF-1.4 OLD"), 0o644)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ct, body := multipartBody([][2]string{{"same.pdf", fmt.Sprintf("%%PDF-1.4 writer-%d", i)}})
+			if w := req(h, "POST", "/api/upload", "x", nil, ct, body); w.Code != 204 {
+				t.Errorf("upload %d: %d", i, w.Code)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if peak.Load() != 1 {
+		t.Fatalf("%d uploads were writing into the library at once", peak.Load())
+	}
 }

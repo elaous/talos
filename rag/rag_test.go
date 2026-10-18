@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/elaous/gojiberry/pdftext"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,4 +425,39 @@ func TestLongIngestSavesProgressWhileRunning(t *testing.T) {
 	cancel()
 	<-done
 	t.Fatal("progress was not saved while the ingest was still running")
+}
+
+func TestSlowPDFReadIsNotRememberedAsBad(t *testing.T) {
+	dir := t.TempDir()
+	writePDF(t, filepath.Join(dir, "big.pdf"), "Revenue grew.")
+	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), &fakeEmb{}, "e", 400, 50)
+	real := extractPages
+	defer func() { extractPages = real }()
+	extractPages = func([]byte) ([]string, error) { return nil, fmt.Errorf("busy: %w", pdftext.ErrTimeout) }
+	if _, err := l.IngestDir(context.Background(), dir); err == nil {
+		t.Fatal("timeout not reported")
+	}
+	if len(l.bad) != 0 {
+		t.Fatalf("a timeout was remembered as permanent: %v", l.bad)
+	}
+	extractPages = real // the machine is quiet again: the same, unchanged file is retried and indexed
+	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["big.pdf"] == 0 {
+		t.Fatalf("not retried: %v %v", err, l.Sources())
+	}
+}
+
+func TestLibraryWithoutAPathSavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writePDF(t, filepath.Join(dir, "a.pdf"), "Revenue grew.")
+	cwd := t.TempDir()
+	old, _ := os.Getwd()
+	os.Chdir(cwd)
+	defer os.Chdir(old)
+	l := &Library{emb: &fakeEmb{}, size: 400, overlap: 50}
+	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["a.pdf"] == 0 {
+		t.Fatalf("%v %v", err, l.Sources())
+	}
+	if entries, _ := os.ReadDir(cwd); len(entries) != 0 {
+		t.Fatalf("files written to the working directory: %v", entries)
+	}
 }

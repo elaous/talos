@@ -115,6 +115,9 @@ func (l *Library) snapshot() diskIndex {
 // save writes a snapshot atomically (temp file in the same directory, fsync, rename). It takes no library
 // lock, so searches never wait for the disk; call it with a snapshot taken under l.mu.
 func (l *Library) save(d diskIndex) error {
+	if l.path == "" { // an in-memory library (not made by Open) has nowhere to save
+		return nil
+	}
 	l.saveMu.Lock()
 	defer l.saveMu.Unlock()
 	dir := filepath.Dir(l.path)
@@ -242,7 +245,7 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 				return ctx.Err()
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-			if !errors.Is(err, errEmbed) { // the file is at fault, not the model server: remember it
+			if !errors.Is(err, errEmbed) && !errors.Is(err, pdftext.ErrTimeout) { // the file is at fault (not the model server, not a busy machine): remember it
 				l.mu.Lock()
 				l.bad[name] = badFile{h, err.Error()}
 				l.mu.Unlock()
@@ -304,8 +307,11 @@ func (l *Library) drop(name string) {
 	l.chunks = kept
 }
 
+// extractPages reads a PDF's text; a variable so tests can make it fail the way a busy machine does.
+var extractPages = pdftext.ExtractPagesBytes
+
 func (l *Library) embedPDF(ctx context.Context, name string, data []byte) ([]Chunk, error) {
-	pages, err := pdftext.ExtractPagesBytes(data)
+	pages, err := extractPages(data)
 	if err != nil {
 		return nil, err
 	}

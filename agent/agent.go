@@ -188,22 +188,42 @@ func ExtractJSON(s string) (map[string]any, bool) {
 // closingTag matches any spelling of a fence-closing tag: any case, spaces, and the fullwidth "<".
 var closingTag = regexp.MustCompile(`(?i)[<\x{FF1C}]\s*/\s*tool_?result`)
 
-// shortenCall is the model's own tool call as kept in the conversation: still valid JSON, but with long string
-// arguments (a whole draft passed to the writer, say) cut, so one big call does not crowd out everything else.
+// shortenCall is the model's own tool call as kept in the conversation: still valid JSON, but with every long
+// string inside it (a whole draft passed to the writer, a nested list of notes) cut, so one big call does not
+// crowd out everything else. The tool name is kept, but bounded.
 func shortenCall(call map[string]any) string {
-	short := map[string]any{"tool": call["tool"]}
-	if args, ok := call["args"].(map[string]any); ok {
-		cut := make(map[string]any, len(args))
-		for k, v := range args {
-			if str, ok := v.(string); ok && len(str) > 500 {
-				v = strings.ToValidUTF8(str[:500], "") + "…[cut from history]"
-			}
-			cut[k] = v
-		}
-		short["args"] = cut
+	short := map[string]any{"tool": cutValue(call["tool"], 100)}
+	if args, ok := call["args"]; ok {
+		short["args"] = cutValue(args, 500)
 	}
 	b, _ := json.Marshal(short)
 	return string(b)
+}
+
+func cutValue(v any, max int) any {
+	switch x := v.(type) {
+	case string:
+		if len(x) > max {
+			return strings.ToValidUTF8(x[:max], "") + "…[cut from history]"
+		}
+		return x
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = cutValue(e, max)
+		}
+		return out
+	case []any:
+		if len(x) > 50 {
+			x = x[:50]
+		}
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = cutValue(e, max)
+		}
+		return out
+	}
+	return v
 }
 
 // maxContextChars bounds what one agent sends to the model (about 4 characters per token), so the protocol
