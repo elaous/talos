@@ -1,0 +1,590 @@
+// Package server is talos's HTTP face: a small JSON API and the WASM UI.
+//
+// There is no login, so it listens on loopback by default. Every state-changing request must come from the
+// same origin, which stops a web page you happen to visit from driving the agents through localhost.
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"github.com/elaous/gojiberry/wasmserve"
+	"github.com/elaous/talos/agent"
+	"github.com/elaous/talos/llm"
+	"github.com/elaous/talos/rag"
+)
+
+const maxUpload = 64 << 20 // pdftext refuses larger PDFs anyway
+
+type Server struct {
+	Team   *agent.Team
+	Lib    *rag.Library
+	PDFDir string
+	UI     fs.FS
+	// AllowedHosts are the Host header values (without port) a request may carry, besides loopback names.
+	// Empty means "any": only correct when the server is meant to be reached by other names (see config).
+	AllowedHosts []string
+	// Ctx ends the server's background work (indexing). Nil means it never ends.
+	Ctx     context.Context
+	wg      sync.WaitGroup // background ingests
+	up      chan struct{}  // limits concurrent uploads, which are buffered in memory
+	writeMu sync.Mutex     // one upload writes into the library at a time
+
+	mu       sync.Mutex
+	jobs     map[string]*job
+	indexing bool
+	rerun    bool // files arrived while indexing: run once more when it ends
+	closed   bool // Wait was called: StartIngest refuses
+	lastErr  string
+	lastAdd  int
+}
+
+const (
+	maxRunning   = 4   // concurrent agent runs
+	maxJobs      = 100 // jobs kept (running or finished)
+	maxHistory   = 10  // messages of earlier conversation sent along
+	maxMsgLen    = 16 << 10
+	maxHistChars = 24 << 10 // total characters of earlier conversation sent along
+	maxUploads   = 2
+)
+
+// uploadTimeout is how long a whole upload may take to arrive.
+var uploadTimeout = 2 * time.Minute
+
+// Wait blocks until background indexing has stopped (after Ctx is cancelled, at most one file's worth).
+func (s *Server) Wait() {
+	s.mu.Lock()
+	s.closed = true // no new indexing after this: wg.Add must not race with Wait
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+func (s *Server) ctx() context.Context {
+	if s.Ctx != nil {
+		return s.Ctx
+	}
+	return context.Background()
+}
+
+type job struct {
+	mu     sync.Mutex
+	events []agent.Event
+	done   bool
+	answer string
+	err    string
+	cancel context.CancelFunc
+	start  time.Time
+}
+
+func (s *Server) Handler() http.Handler {
+	s.jobs = map[string]*job{}
+	s.up = make(chan struct{}, maxUploads)
+	removeStaleBackups(s.PDFDir)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/ask", s.ask)
+	mux.HandleFunc("GET /api/jobs/{id}", s.poll)
+	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancel)
+	mux.HandleFunc("GET /api/library", s.library)
+	mux.HandleFunc("POST /api/ingest", s.ingest)
+	mux.HandleFunc("POST /api/upload", s.upload)
+	mux.Handle("/", wasmserve.Handler(s.UI, wasmserve.Options{Fallback: "index.html"}))
+	return s.guard(mux)
+}
+
+// guard refuses requests a browser would send on behalf of another site:
+//   - a Host that is not ours (DNS rebinding makes a hostile page and our server "same origin" under its own
+//     name, so Origin vs Host alone proves nothing);
+//   - Sec-Fetch-Site: cross-site, and for anything but GET an Origin that is not Host.
+func (s *Server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.hostOK(r.Host) {
+			http.Error(w, "unexpected Host header", http.StatusForbidden)
+			return
+		}
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "cross-site request refused", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if o := r.Header.Get("Origin"); o != "" {
+				if u, err := url.Parse(o); err != nil || u.Host != r.Host {
+					http.Error(w, "cross-origin request refused", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) hostOK(hostport string) bool {
+	if len(s.AllowedHosts) == 0 {
+		return true
+	}
+	h := hostport
+	if sh, _, err := net.SplitHostPort(hostport); err == nil {
+		h = sh
+	}
+	h = strings.TrimSuffix(strings.Trim(strings.ToLower(h), "[]"), ".") // "localhost." is the same name
+	switch h {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	for _, a := range s.AllowedHosts {
+		if strings.EqualFold(a, h) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		http.Error(w, "want application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	var in struct {
+		Question string        `json:"question"`
+		History  []llm.Message `json:"history"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil || strings.TrimSpace(in.Question) == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(in.Question) > maxMsgLen {
+		http.Error(w, "question too long", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(in.History) > maxHistory {
+		in.History = in.History[len(in.History)-maxHistory:]
+	}
+	for i := range in.History { // the client supplies history, so it may not smuggle in system prompts
+		if in.History[i].Role != "assistant" {
+			in.History[i].Role = "user"
+		}
+		if len(in.History[i].Content) > maxMsgLen {
+			in.History[i].Content = in.History[i].Content[:maxMsgLen]
+		}
+	}
+	for n := 0; ; { // drop the oldest messages until the history fits its character budget
+		n = 0
+		for _, m := range in.History {
+			n += len(m.Content)
+		}
+		if n <= maxHistChars || len(in.History) == 0 {
+			break
+		}
+		in.History = in.History[1:]
+	}
+	var idb [8]byte
+	_, _ = rand.Read(idb[:])
+	id := hex.EncodeToString(idb[:])
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	j := &job{cancel: cancel, start: time.Now()}
+	s.mu.Lock()
+	s.gc()
+	if s.running() >= maxRunning {
+		s.mu.Unlock()
+		cancel()
+		http.Error(w, "too many questions running; wait for one to finish", http.StatusTooManyRequests)
+		return
+	}
+	s.jobs[id] = j
+	s.mu.Unlock()
+	go func() {
+		defer cancel()
+		ans, err := s.Team.Ask(ctx, in.Question, in.History, func(e agent.Event) {
+			j.mu.Lock()
+			j.events = append(j.events, e)
+			j.mu.Unlock()
+		})
+		j.mu.Lock()
+		j.done, j.answer = true, ans
+		if err != nil {
+			j.err = err.Error()
+		}
+		j.mu.Unlock()
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
+}
+
+// gc forgets finished jobs older than an hour, and the oldest finished ones beyond maxJobs. Caller holds s.mu.
+func (s *Server) gc() {
+	type fin struct {
+		id string
+		at time.Time
+	}
+	var done []fin
+	for id, j := range s.jobs {
+		j.mu.Lock()
+		d := j.done
+		j.mu.Unlock()
+		if !d {
+			continue
+		}
+		if time.Since(j.start) > time.Hour {
+			delete(s.jobs, id)
+		} else {
+			done = append(done, fin{id, j.start})
+		}
+	}
+	sort.Slice(done, func(i, k int) bool { return done[i].at.Before(done[k].at) })
+	for len(s.jobs) >= maxJobs && len(done) > 0 {
+		delete(s.jobs, done[0].id)
+		done = done[1:]
+	}
+}
+
+// running counts unfinished jobs. Caller holds s.mu.
+func (s *Server) running() (n int) {
+	for _, j := range s.jobs {
+		j.mu.Lock()
+		if !j.done {
+			n++
+		}
+		j.mu.Unlock()
+	}
+	return
+}
+
+func (s *Server) job(r *http.Request) *job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobs[r.PathValue("id")]
+}
+
+func (s *Server) poll(w http.ResponseWriter, r *http.Request) {
+	j := s.job(r)
+	if j == nil {
+		http.NotFound(w, r)
+		return
+	}
+	since := 0
+	if v := r.URL.Query().Get("since"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			http.Error(w, "bad since", http.StatusBadRequest)
+			return
+		}
+		since = n
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	ev := []agent.Event{}
+	if since < len(j.events) {
+		ev = j.events[since:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": ev, "next": len(j.events), "done": j.done, "answer": j.answer, "error": j.err})
+}
+
+func (s *Server) cancel(w http.ResponseWriter, r *http.Request) {
+	if j := s.job(r); j != nil {
+		j.cancel()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type libStatus struct {
+	Sources  []libSource `json:"sources"`
+	Indexing bool        `json:"indexing"`
+	Added    int         `json:"added"`
+	Error    string      `json:"error"`
+}
+type libSource struct {
+	Name     string `json:"name"`
+	Passages int    `json:"passages"`
+}
+
+func (s *Server) library(w http.ResponseWriter, _ *http.Request) {
+	st := libStatus{Sources: []libSource{}}
+	for n, c := range s.Lib.Sources() {
+		st.Sources = append(st.Sources, libSource{n, c})
+	}
+	sort.Slice(st.Sources, func(i, j int) bool { return st.Sources[i].Name < st.Sources[j].Name })
+	s.mu.Lock()
+	st.Indexing, st.Added, st.Error = s.indexing, s.lastAdd, s.lastErr
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, st)
+}
+
+// StartIngest indexes the PDF folder in the background. If a run is already going, it makes that run go
+// around once more when it ends (so a file saved after its walk is still picked up) and returns false.
+func (s *Server) StartIngest() bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	if s.indexing {
+		s.rerun = true
+		s.mu.Unlock()
+		return false
+	}
+	s.indexing, s.lastErr, s.lastAdd = true, "", 0
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		for {
+			n, err := s.Lib.IngestDir(s.ctx(), s.PDFDir)
+			s.mu.Lock()
+			s.lastAdd += n
+			s.lastErr = "" // the latest pass decides what is shown
+			if err != nil {
+				s.lastErr = err.Error()
+			}
+			if s.rerun && s.ctx().Err() == nil {
+				s.rerun = false
+				s.mu.Unlock()
+				continue
+			}
+			s.indexing, s.rerun = false, false
+			s.mu.Unlock()
+			return
+		}
+	}()
+	return true
+}
+
+func (s *Server) ingest(w http.ResponseWriter, _ *http.Request) {
+	s.StartIngest()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// upload takes PDFs from a multipart form. Every part is read and checked first, so a bad one saves nothing,
+// and each file is written under a temporary name and renamed, so an ingest never reads a half-written PDF.
+// A file with an existing name replaces it: that is how a library document is updated.
+func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.up <- struct{}{}:
+		defer func() { <-s.up }()
+	default:
+		http.Error(w, "too many uploads in progress", http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
+	// A client that connects and then stalls must not hold an upload slot for ever.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
+	mr, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "bad upload", http.StatusBadRequest)
+		return
+	}
+	files := map[string][]byte{}
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "bad upload", http.StatusBadRequest)
+			return
+		}
+		if p.FileName() == "" {
+			continue
+		}
+		name := filepath.Base(strings.ReplaceAll(p.FileName(), "\\", "/"))
+		if !strings.EqualFold(filepath.Ext(name), ".pdf") || name == ".pdf" || len(name) > 200 || strings.ContainsFunc(name, unicode.IsControl) {
+			http.Error(w, "not an acceptable .pdf file name", http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(p)
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "bad upload", http.StatusBadRequest)
+			return
+		}
+		if !bytes.HasPrefix(data, []byte("%PDF-")) {
+			http.Error(w, "not a PDF: "+name, http.StatusBadRequest)
+			return
+		}
+		files[name] = data
+	}
+	if len(files) == 0 {
+		http.Error(w, "no PDF in the upload", http.StatusBadRequest)
+		return
+	}
+	if err := os.MkdirAll(s.PDFDir, 0o755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeMu.Lock()
+	err = writeAll(s.PDFDir, files)
+	s.writeMu.Unlock()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.StartIngest()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// rename is os.Rename; tests replace it to make a late rename fail or to look at the state between steps.
+var rename = os.Rename
+
+// link and writeFile are what the backup step uses; tests replace them to make the copy fallback fail.
+var (
+	link      = os.Link
+	writeFile = os.WriteFile
+)
+
+// backupSuffix marks the copy of a file that an upload is about to replace.
+const backupSuffix = ".replaced~"
+
+// uniqueKeptName is the first of x.pdf.recovered~, x.pdf.recovered~2, ... that does not exist, so a second failed
+// restore never overwrites the copy an earlier one kept.
+func uniqueKeptName(to string) string {
+	name := to + keptSuffix
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(name); err != nil {
+			return name
+		}
+		name = fmt.Sprintf("%s%s%d", to, keptSuffix, i)
+	}
+}
+
+// keptSuffix marks the only remaining copy of a file whose restore failed. It is never swept.
+const keptSuffix = ".recovered~"
+
+// writeAll saves every file or none, unless the process is killed half way, and a file that is replaced is never
+// missing or half-written: destinations are checked first, all data goes to temporary names, each existing
+// destination gets a hard-linked (else copied) backup, and then every temporary file is renamed over its
+// destination, which is atomic. If any step fails, the files created so far are removed and the backups put
+// back; if a restore itself fails the backup is kept, as the only copy of the old file. On success the backups
+// are deleted. A kill between two renames leaves some files replaced and some not, each of them whole; the
+// leftovers (backups, temporary files) are removed when the server starts, except a *.recovered~ file, which
+// is the old copy of a file whose restore failed and is kept for a person to look at.
+func writeAll(dir string, files map[string][]byte) error {
+	type tmp struct{ from, to, backup string }
+	var done []tmp
+	cleanup := func() {
+		for _, t := range done {
+			os.Remove(t.from)
+		}
+	}
+	for name := range files {
+		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s exists and is not a file", name)
+		}
+	}
+	for name, data := range files {
+		f, err := os.CreateTemp(dir, ".upload-*")
+		if err != nil {
+			cleanup()
+			return err
+		}
+		done = append(done, tmp{from: f.Name(), to: filepath.Join(dir, name)})
+		_, werr := f.Write(data)
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			cleanup()
+			return werr
+		}
+	}
+	var placed []tmp // destinations already replaced or created
+	undo := func() {
+		kept := map[string]bool{} // backups whose restore failed: they are now the only copy of the old file
+		for i := len(placed) - 1; i >= 0; i-- {
+			if t := placed[i]; t.backup != "" {
+				if err := os.Rename(t.backup, t.to); err != nil { // atomically puts the old file back
+					// The restore failed, so this is now the only copy of the old file. Rename it to a name the
+					// startup sweep leaves alone, so it survives for whoever has to put it back by hand.
+					if os.Rename(t.backup, uniqueKeptName(t.to)) == nil {
+						continue
+					}
+					kept[t.backup] = true
+				}
+			} else {
+				os.Remove(t.to)
+			}
+		}
+		for _, t := range done {
+			if t.backup != "" && !kept[t.backup] {
+				os.Remove(t.backup)
+			}
+		}
+		cleanup()
+	}
+	for i := range done {
+		t := &done[i]
+		if _, err := os.Lstat(t.to); err == nil {
+			t.backup = t.to + backupSuffix
+			os.Remove(t.backup)
+			if err := link(t.to, t.backup); err != nil { // no hard links here: copy
+				old, rerr := os.ReadFile(t.to)
+				if rerr == nil {
+					rerr = writeFile(t.backup, old, 0o644)
+				}
+				if rerr != nil {
+					os.Remove(t.backup) // a partial copy must not survive as a "backup"
+					t.backup = ""
+					undo()
+					return rerr
+				}
+			}
+		}
+		if err := rename(t.from, t.to); err != nil {
+			if t.backup != "" {
+				os.Remove(t.backup)
+				t.backup = ""
+			}
+			undo()
+			return err
+		}
+		placed = append(placed, *t)
+	}
+	for _, t := range placed {
+		if t.backup != "" {
+			os.Remove(t.backup)
+		}
+	}
+	return nil
+}
+
+// removeStaleBackups deletes what a crashed upload left behind: backups and temporary files. It lists the folder
+// (no pattern matching, so odd characters in the folder's name cannot disable it) and touches only regular
+// files with those exact markers.
+func removeStaleBackups(dir string) {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		n := e.Name()
+		if e.Type().IsRegular() && (strings.HasSuffix(n, backupSuffix) || strings.HasPrefix(n, ".upload-")) {
+			os.Remove(filepath.Join(dir, n))
+		}
+	}
+}

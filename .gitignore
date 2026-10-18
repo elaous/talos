@@ -31,3 +31,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# talos
+bin/
+ui/dist/
+data/
+pdfs/
+talos.json
