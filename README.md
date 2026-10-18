@@ -52,7 +52,7 @@ scripted in tests, so no model is needed.
   something that authenticates if others can reach it.
 - **Web access.** `fetch_url` refuses loopback, LAN, link-local, CGNAT and cloud-metadata addresses.
   Direct requests use a dialler that checks the address it actually connects to, with no exemptions, so
-  redirects, DNS tricks and odd spellings of a host (`127.1`, `0x7f.1`, `２２７…`, `LOCALHOST.`) do not help.
+  redirects, DNS tricks and odd spellings of a host (`127.1`, `0x7f.1`, `１２７…`, `LOCALHOST.`) do not help.
   With `HTTP(S)_PROXY` set (and `NO_PROXY` applied per request), a proxied request goes through a transport
   that can dial only the proxy, after its target is validated: not `localhost`, not a non-public address in any
   spelling, and not a name that resolves here to one. That validation is **best-effort**: the proxy resolves
@@ -60,6 +60,8 @@ scripted in tests, so no model is needed.
   resolve is passed on, so with a proxy what the LAN exposes depends on the proxy. `fetch_url` opens only URLs
   from your message or from search results, so a hostile page cannot make the model request an attacker URL
   carrying private text. `web.allow_private` lifts the address check; a SearXNG on localhost works without it.
+  (A split-DNS or fake-IP resolver that answers with `198.18.0.0/15` or other private addresses for public
+  names makes proxied fetches fail by design; set `allow_private` if that is your network.)
 - **Search queries leave the machine.** A model steered by hostile text could put private PDF text into a
   `web_search` query. That is inherent to giving an agent both your documents and web search. Use a local
   SearXNG, or set `"web": {"disabled": true}` to drop the web researcher entirely so nothing leaves the machine.
@@ -71,6 +73,8 @@ scripted in tests, so no model is needed.
   run also saves about every 15 seconds.
 - **One process per index.** Run `ingest` only while `serve` is stopped (or use the UI's re-index): two
   processes would overwrite each other's saved index.
+- Files in the PDF folder named `.upload-*` or `*.replaced~` are deleted when the server starts (they are an
+  interrupted upload's leftovers); `*.recovered~` is never touched.
 - A PDF with no text layer (a scan) or one that is corrupt is reported and skipped, and not retried until it
   changes; the rest are still indexed. An embedding-server outage is not held against the PDF: it is retried.
 

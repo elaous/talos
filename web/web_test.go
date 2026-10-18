@@ -2,9 +2,11 @@ package web
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -220,12 +222,20 @@ func TestNameOnlyTheProxyCanResolvePassesThrough(t *testing.T) {
 func TestNonASCIISpellingOfTheProxyAddressIsRefused(t *testing.T) {
 	var mu sync.Mutex
 	hits := 0
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		w.Write([]byte("<p>proxy</p>"))
 	}))
+	proxy.Config.ConnState = func(_ net.Conn, st http.ConnState) { // a TLS ClientHello never reaches the handler
+		if st == http.StateNew {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+		}
+	}
+	proxy.Start()
 	defer proxy.Close()
 	t.Setenv("HTTP_PROXY", proxy.URL)
 	t.Setenv("http_proxy", proxy.URL)
@@ -313,6 +323,113 @@ func TestDirectFetchesJudgeTheDialledAddress(t *testing.T) {
 	for _, u := range []string{"http://１２７.0.0.1:" + port, "http://LOCALHOST.:" + port, "http://localhost:" + port, "http://[::1]:" + port} {
 		if got, err := c.Fetch(context.Background(), u, 100); err == nil {
 			t.Errorf("%s: %q", u, got)
+		}
+	}
+}
+
+// connectProxy is an HTTP proxy that records the CONNECT targets (https) and request URLs (http) it is asked
+// for, and refuses to actually connect, so a fetch to it ends in an error: what matters is what it was asked.
+func connectProxy(t *testing.T) (*httptest.Server, func() []string) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.Method == http.MethodConnect {
+			seen = append(seen, "CONNECT "+r.Host)
+		} else {
+			seen = append(seen, r.Method+" "+r.URL.String())
+		}
+		mu.Unlock()
+		http.Error(w, "no", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), seen...) }
+}
+
+// Round 6: the host the proxy receives in a CONNECT line is spelled by net/http (IDNA mapping), so the host that
+// is validated must be spelled the same way: an ideographic full stop, a doubled dot or fullwidth digits must not
+// turn a refused address into an accepted one.
+func TestHTTPSTargetsReachTheProxyOnlyIfPublic(t *testing.T) {
+	proxy, seen := connectProxy(t)
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	for _, u := range []string{
+		"https://localhost。/", "https://127.0.0.1。/", "https://LOCALHOST．/", "https://0x7f.1。/", "https://2130706433。/",
+		"https://localhost../", "https://127.0.0.1../", "https://LOCALHOST./", "https://127.0.0.1./",
+		"https://１０.0.0.1/", "https://１９２.168.1.1/", "https://１２７.0.0.1/", "https://0.1.2.3/", "https://168.63.129.16/",
+		"https://[::1]/", "https://[fe80::1%25eth0]/", "https://[::ffff:10.0.0.1]/", "https://[64:ff9b::a00:1]/",
+		"https://169.254.169.254/", "https://foo.localhost/",
+	} {
+		c.Fetch(context.Background(), u, 100)
+	}
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("the proxy was asked to connect to private targets: %v", got)
+	}
+	for _, u := range []string{
+		"https://203.0.113.9/", "https://[2606:4700:4700::1111]/", "https://my_host.example.invalid/", "https://xn--bcher-kva.example.invalid/",
+		"https://straße.example.invalid/", "https://1e100.net/", "https://3com.com/", "https://a.b.c.1/",
+	} {
+		c.Fetch(context.Background(), u, 100)
+	}
+	want := []string{
+		"CONNECT 203.0.113.9:443", "CONNECT [2606:4700:4700::1111]:443", "CONNECT my_host.example.invalid:443",
+		"CONNECT xn--bcher-kva.example.invalid:443", "CONNECT xn--strae-oqa.example.invalid:443", "CONNECT 1e100.net:443",
+		"CONNECT 3com.com:443", "CONNECT a.b.c.1:443",
+	}
+	got := seen()
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("public targets did not all reach the proxy:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestZeroNetworkAndAzureWireServerAreBlocked(t *testing.T) {
+	for _, ip := range []string{"0.1.2.3", "0.255.255.255", "168.63.129.16"} {
+		if !BlockedIP(netip.MustParseAddr(ip)) {
+			t.Errorf("%s not blocked", ip)
+		}
+	}
+	for _, ip := range []string{"1.0.0.1", "168.63.129.17", "8.8.4.4"} {
+		if BlockedIP(netip.MustParseAddr(ip)) {
+			t.Errorf("%s wrongly blocked", ip)
+		}
+	}
+}
+
+// A NO_PROXY entry that happens to match the old probe host must not break every proxied request.
+func TestProxyTransportsAreMadeOnDemand(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	setProxy(t, proxy.URL)
+	t.Setenv("NO_PROXY", ".invalid")
+	t.Setenv("no_proxy", ".invalid")
+	if got, err := New("", false).Fetch(context.Background(), "http://203.0.113.9/x", 100); err != nil || got != "via proxy" || len(*seen) != 1 {
+		t.Fatalf("%q %v %v", got, err, *seen)
+	}
+}
+
+func TestNormalizeHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"Example.COM": "example.com", "localhost.": "localhost", "localhost..": "localhost", "localhost。": "localhost",
+		"LOCALHOST．": "localhost", "１２７.0.0.1": "127.0.0.1", "my_host.example.com": "my_host.example.com",
+		"2606:4700::1111": "2606:4700::1111", "straße.de": "xn--strae-oqa.de", "": "",
+	} {
+		if got, err := normalizeHost(in); err != nil || got != want {
+			t.Errorf("%q -> %q %v, want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestValidateProxiedTargetDirectly(t *testing.T) {
+	ctx := context.Background()
+	for _, h := range []string{"::1::2", "2606:4700::zz", "fe80::1", "::1", "::ffff:127.0.0.1", "localhost", "foo.LOCALHOST", "0x7f.1", "1.2.3.4.5", "0x"} {
+		if err := validateProxiedTarget(ctx, h); err == nil {
+			t.Errorf("%q was accepted", h)
+		}
+	}
+	for _, h := range []string{"2606:4700:4700::1111", "8.8.8.8", "example.invalid", "my_host.example.invalid", "134744072"} {
+		if err := validateProxiedTarget(ctx, h); err != nil {
+			t.Errorf("%q was refused: %v", h, err)
 		}
 	}
 }

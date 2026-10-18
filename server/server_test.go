@@ -768,10 +768,15 @@ func TestFailedRestoreKeepsTheBackup(t *testing.T) {
 	if err := writeAll(dir, map[string][]byte{"a.pdf": []byte("%PDF-1.4 NEW"), "b.pdf": []byte("%PDF-1.4 NEW")}); err == nil {
 		t.Fatal("no error")
 	}
-	got, err := os.ReadFile(first + backupSuffix)
+	got, err := os.ReadFile(first + keptSuffix)
 	want := map[string]string{a: "%PDF-1.4 OLD-A", b: "%PDF-1.4 OLD-B"}[first]
 	if err != nil || string(got) != want {
-		t.Fatalf("the only copy of the old %s was deleted: %q %v", filepath.Base(first), got, err)
+		t.Fatalf("the only copy of the old %s was lost: %q %v", filepath.Base(first), got, err)
+	}
+	// and the startup sweep does not delete it
+	removeStaleBackups(dir)
+	if got, err := os.ReadFile(first + keptSuffix); err != nil || string(got) != want {
+		t.Fatalf("the sweep deleted the kept copy: %q %v", got, err)
 	}
 }
 

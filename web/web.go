@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,17 +33,19 @@ type Client struct {
 var blockedNets = func() []netip.Prefix {
 	var ps []netip.Prefix
 	for _, s := range []string{
-		"100.64.0.0/10",  // carrier-grade NAT: Tailscale, and Alibaba's metadata service 100.100.100.200
-		"198.18.0.0/15",  // benchmarking
-		"192.0.0.0/24",   // IETF protocol assignments
-		"240.0.0.0/4",    // reserved, including 255.255.255.255
-		"64:ff9b:1::/48", // local-use NAT64
-		"fd00:ec2::/32",  // AWS IPv6 metadata
-		"fe80::/10",      // link-local
-		"fec0::/10",      // deprecated site-local
-		"2001:db8::/32",  // documentation
-		"2001::/32",      // Teredo
-		"::ffff:0:0/96",  // IPv4-mapped (also unmapped by the caller)
+		"0.0.0.0/8",        // "this network": 0.1.2.3 is not a public host
+		"168.63.129.16/32", // Azure WireServer, a metadata-like service on a public-looking address
+		"100.64.0.0/10",    // carrier-grade NAT: Tailscale, and Alibaba's metadata service 100.100.100.200
+		"198.18.0.0/15",    // benchmarking
+		"192.0.0.0/24",     // IETF protocol assignments
+		"240.0.0.0/4",      // reserved, including 255.255.255.255
+		"64:ff9b:1::/48",   // local-use NAT64
+		"fd00:ec2::/32",    // AWS IPv6 metadata
+		"fe80::/10",        // link-local
+		"fec0::/10",        // deprecated site-local
+		"2001:db8::/32",    // documentation
+		"2001::/32",        // Teredo
+		"::ffff:0:0/96",    // IPv4-mapped (also unmapped by the caller)
 	} {
 		ps = append(ps, netip.MustParsePrefix(s))
 	}
@@ -104,7 +107,9 @@ func New(searxngURL string, allowPrivate bool) *Client {
 type pageTransport struct {
 	pf      func(*url.URL) (*url.URL, error)
 	direct  *http.Transport
-	proxied map[string]*http.Transport // by proxy URL; each can only ever dial its proxy
+	mu      sync.Mutex
+	proxied map[string]*http.Transport // by proxy URL; each can only ever dial its proxy, built on first use
+	plain   *net.Dialer
 }
 
 func newPageTransport(pf func(*url.URL) (*url.URL, error)) *pageTransport {
@@ -122,15 +127,19 @@ func newPageTransport(pf func(*url.URL) (*url.URL, error)) *pageTransport {
 		}
 		return nil
 	}}
-	t := &pageTransport{pf: pf, direct: &http.Transport{DialContext: checked.DialContext}, proxied: map[string]*http.Transport{}}
-	plain := &net.Dialer{Timeout: 10 * time.Second}
-	for _, probe := range []string{"http://probe.invalid/", "https://probe.invalid/"} { // one proxy per scheme at most
-		u, _ := url.Parse(probe)
-		if pu, _ := pf(u); pu != nil && t.proxied[pu.String()] == nil {
-			t.proxied[pu.String()] = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: plain.DialContext}
-		}
+	return &pageTransport{pf: pf, direct: &http.Transport{DialContext: checked.DialContext},
+		proxied: map[string]*http.Transport{}, plain: &net.Dialer{Timeout: 10 * time.Second}}
+}
+
+// proxyTransport is the transport for one proxy URL, made the first time that proxy is needed.
+func (t *pageTransport) proxyTransport(pu *url.URL) *http.Transport {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	key := pu.String()
+	if t.proxied[key] == nil {
+		t.proxied[key] = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: t.plain.DialContext}
 	}
-	return t
+	return t.proxied[key]
 }
 
 func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -141,24 +150,32 @@ func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if pu == nil { // no proxy for this request (none configured, NO_PROXY, loopback): checked dial
 		return t.direct.RoundTrip(r)
 	}
-	tr := t.proxied[pu.String()]
-	if tr == nil {
-		return nil, fmt.Errorf("web: unexpected proxy %s", pu.Redacted())
-	}
 	if err := validateProxiedTarget(r.Context(), r.URL.Hostname()); err != nil {
 		return nil, err
 	}
-	return tr.RoundTrip(r)
+	return t.proxyTransport(pu).RoundTrip(r)
 }
 
-// normalizeHost spells a host the way net/http does when it dials it (IDNA, lower case, no trailing dot), so what
-// is validated is what is connected to: "１２７.0.0.1" and "LOCALHOST." are not new names.
+// normalizeHost spells a host the way net/http does when it sends it on (a pure ASCII host as it is, anything
+// else through IDNA's lookup mapping, which also turns the ideographic and fullwidth full stops into "."), then
+// lower-cases it and drops every trailing dot. What is validated is what the proxy receives: "１２７.0.0.1",
+// "localhost。" and "LOCALHOST.." are not new names.
 func normalizeHost(h string) (string, error) {
-	a, err := idna.Lookup.ToASCII(strings.TrimSuffix(h, "."))
-	if err != nil {
-		return "", fmt.Errorf("web: refusing host %q: %w", h, err)
+	ascii := true
+	for i := 0; i < len(h); i++ {
+		if h[i] >= 0x80 {
+			ascii = false
+			break
+		}
 	}
-	return strings.ToLower(a), nil
+	if !ascii {
+		a, err := idna.Lookup.ToASCII(h)
+		if err != nil {
+			return "", fmt.Errorf("web: refusing host %q: %w", h, err)
+		}
+		h = a
+	}
+	return strings.TrimRight(strings.ToLower(h), "."), nil
 }
 
 // parseLegacyIPv4 reads the forms a C library accepts (inet_aton): 1 to 4 parts, each decimal, 0octal or 0xhex,
@@ -258,6 +275,9 @@ func validateProxiedTarget(ctx context.Context, host string) error {
 			return refuse("private address " + ip.Unmap().String())
 		}
 		return nil
+	}
+	if strings.Contains(h, ":") { // a colon is never in a DNS name: an IPv6 literal we could not parse
+		return refuse("not a valid address")
 	}
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", h)
 	if err != nil {

@@ -464,13 +464,17 @@ var (
 // backupSuffix marks the copy of a file that an upload is about to replace.
 const backupSuffix = ".replaced~"
 
+// keptSuffix marks the only remaining copy of a file whose restore failed. It is never swept.
+const keptSuffix = ".recovered~"
+
 // writeAll saves every file or none, unless the process is killed half way, and a file that is replaced is never
 // missing or half-written: destinations are checked first, all data goes to temporary names, each existing
 // destination gets a hard-linked (else copied) backup, and then every temporary file is renamed over its
 // destination, which is atomic. If any step fails, the files created so far are removed and the backups put
 // back; if a restore itself fails the backup is kept, as the only copy of the old file. On success the backups
 // are deleted. A kill between two renames leaves some files replaced and some not, each of them whole; the
-// leftovers (backups, temporary files) are removed when the server starts.
+// leftovers (backups, temporary files) are removed when the server starts, except a *.recovered~ file, which
+// is the old copy of a file whose restore failed and is kept for a person to look at.
 func writeAll(dir string, files map[string][]byte) error {
 	type tmp struct{ from, to, backup string }
 	var done []tmp
@@ -506,6 +510,11 @@ func writeAll(dir string, files map[string][]byte) error {
 		for i := len(placed) - 1; i >= 0; i-- {
 			if t := placed[i]; t.backup != "" {
 				if err := os.Rename(t.backup, t.to); err != nil { // atomically puts the old file back
+					// The restore failed, so this is now the only copy of the old file. Rename it to a name the
+					// startup sweep leaves alone, so it survives for whoever has to put it back by hand.
+					if os.Rename(t.backup, t.to+keptSuffix) == nil {
+						continue
+					}
 					kept[t.backup] = true
 				}
 			} else {
