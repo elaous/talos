@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/elaous/gojiberry/pdftext"
@@ -159,6 +160,7 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 	seen := map[string]bool{}
 	var errs []error
 	added := 0
+	lastSave := time.Now()
 	walkErr := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -193,6 +195,12 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 		l.drop(name)
 		l.chunks = append(l.chunks, fresh...)
 		l.files[name] = h
+		if time.Since(lastSave) > 15*time.Second { // a long run keeps its progress if the process is stopped
+			if err := l.save(); err != nil {
+				errs = append(errs, err)
+			}
+			lastSave = time.Now()
+		}
 		l.mu.Unlock()
 		added += len(fresh)
 		return nil

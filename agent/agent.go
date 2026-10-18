@@ -125,8 +125,8 @@ func (a *Agent) Run(ctx context.Context, task string, history []llm.Message) (st
 		}
 		a.emit("result", clip(obs, 600))
 		msgs = append(msgs,
-			llm.Message{Role: "assistant", Content: raw},
-			llm.Message{Role: "user", Content: "<tool_result>\n" + strings.ReplaceAll(clip(obs, 8000), "</tool_result>", "") + "\n</tool_result>\nContinue."})
+			llm.Message{Role: "assistant", Content: clip(raw, 4000)},
+			llm.Message{Role: "user", Content: "<tool_result>\n" + strings.ReplaceAll(clip(obs, 8000), "</tool_result", "< /tool_result") + "\n</tool_result>\nContinue."})
 		msgs = compact(msgs, maxContextChars)
 	}
 	return "", fmt.Errorf("agent %s: unreachable", a.Name)
@@ -200,6 +200,9 @@ func compact(msgs []llm.Message, limit int) []llm.Message {
 		if strings.HasPrefix(msgs[i].Content, "<tool_result>") {
 			msgs[i].Content = "<tool_result>[older result omitted to save space]</tool_result>"
 		}
+	}
+	for i := 1; i < len(msgs)-2 && size() > limit; i++ { // still too big: earlier conversation and replies
+		msgs[i].Content = clip(msgs[i].Content, 500)
 	}
 	return msgs
 }

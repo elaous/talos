@@ -81,40 +81,54 @@ func run(cfgPath string, args []string) error {
 		if _, err := fs.Stat(ui, "main.wasm"); err != nil {
 			return fmt.Errorf("the UI is not built (%s/main.wasm missing): run `make ui`", cfg.UIDir)
 		}
+		hosts, err := allowedHosts(cfg)
+		if err != nil {
+			return err
+		}
 		s := &server.Server{
 			Team:         agent.NewTeam(cfg, chat, lib, web.New(cfg.Web.SearxngURL, cfg.Web.AllowPrivate)),
 			Lib:          lib,
 			PDFDir:       cfg.PDFDir,
 			UI:           ui,
-			AllowedHosts: allowedHosts(cfg),
+			AllowedHosts: hosts,
+			Ctx:          ctx,
 		}
 		srv := &http.Server{Addr: cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-		go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
+		shutdown := make(chan struct{})
+		go func() {
+			<-ctx.Done()
+			sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(sc)
+			close(shutdown)
+		}()
 		log.Printf("talos on http://%s  (%d PDFs indexed)", cfg.Listen, len(lib.Sources()))
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 			return err
 		}
+		<-shutdown
+		s.Wait() // an ingest in progress saves what it finished before the process exits
 		return nil
 	}
 	return fmt.Errorf("unknown command %q (serve, ingest, ask)", cmd)
 }
 
-// allowedHosts is the set of Host names the server answers to: the listen host and any configured names. On a
-// wildcard listen address with none configured it is empty, which turns the check off (any name reaches it).
-func allowedHosts(cfg config.Config) []string {
+// allowedHosts is the set of Host names the server answers to: the listen host, loopback and any configured
+// names. A wildcard listen address (0.0.0.0, ::, or just a port) needs allowed_hosts: without a list the Host
+// check would be off, and with no login that is what makes DNS rebinding work.
+func allowedHosts(cfg config.Config) ([]string, error) {
 	hosts := append([]string(nil), cfg.AllowedHosts...)
 	h, _, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
-		return hosts
+		return nil, fmt.Errorf("listen %q: %w", cfg.Listen, err)
 	}
 	switch h {
 	case "", "0.0.0.0", "::":
 		if len(hosts) == 0 {
-			log.Printf("warning: listening on all interfaces without allowed_hosts; the Host check is off and there is no login")
-			return nil
+			return nil, fmt.Errorf("listen %q is open to the network and talos has no login: set allowed_hosts to the names you reach it by", cfg.Listen)
 		}
 	default:
 		hosts = append(hosts, h)
 	}
-	return append(hosts, "localhost", "127.0.0.1", "::1")
+	return append(hosts, "localhost", "127.0.0.1", "::1"), nil
 }

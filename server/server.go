@@ -10,6 +10,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -22,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/elaous/gojiberry/wasmserve"
 	"github.com/elaous/talos/agent"
@@ -39,6 +42,10 @@ type Server struct {
 	// AllowedHosts are the Host header values (without port) a request may carry, besides loopback names.
 	// Empty means "any": only correct when the server is meant to be reached by other names (see config).
 	AllowedHosts []string
+	// Ctx ends the server's background work (indexing). Nil means it never ends.
+	Ctx context.Context
+	wg  sync.WaitGroup // background ingests
+	up  chan struct{}  // limits concurrent uploads, which are buffered in memory
 
 	mu       sync.Mutex
 	jobs     map[string]*job
@@ -49,11 +56,23 @@ type Server struct {
 }
 
 const (
-	maxRunning = 4   // concurrent agent runs
-	maxJobs    = 100 // jobs kept (running or finished)
-	maxHistory = 10  // messages of earlier conversation sent along
-	maxMsgLen  = 16 << 10
+	maxRunning   = 4   // concurrent agent runs
+	maxJobs      = 100 // jobs kept (running or finished)
+	maxHistory   = 10  // messages of earlier conversation sent along
+	maxMsgLen    = 16 << 10
+	maxHistChars = 24 << 10 // total characters of earlier conversation sent along
+	maxUploads   = 2
 )
+
+// Wait blocks until background indexing has stopped (after Ctx is cancelled, at most one file's worth).
+func (s *Server) Wait() { s.wg.Wait() }
+
+func (s *Server) ctx() context.Context {
+	if s.Ctx != nil {
+		return s.Ctx
+	}
+	return context.Background()
+}
 
 type job struct {
 	mu     sync.Mutex
@@ -67,6 +86,7 @@ type job struct {
 
 func (s *Server) Handler() http.Handler {
 	s.jobs = map[string]*job{}
+	s.up = make(chan struct{}, maxUploads)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ask", s.ask)
 	mux.HandleFunc("GET /api/jobs/{id}", s.poll)
@@ -158,6 +178,16 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		if len(in.History[i].Content) > maxMsgLen {
 			in.History[i].Content = in.History[i].Content[:maxMsgLen]
 		}
+	}
+	for n := 0; ; { // drop the oldest messages until the history fits its character budget
+		n = 0
+		for _, m := range in.History {
+			n += len(m.Content)
+		}
+		if n <= maxHistChars || len(in.History) == 0 {
+			break
+		}
+		in.History = in.History[1:]
 	}
 	var idb [8]byte
 	_, _ = rand.Read(idb[:])
@@ -300,21 +330,24 @@ func (s *Server) StartIngest() bool {
 		return false
 	}
 	s.indexing, s.lastErr, s.lastAdd = true, "", 0
+	s.wg.Add(1)
 	s.mu.Unlock()
 	go func() {
+		defer s.wg.Done()
 		for {
-			n, err := s.Lib.IngestDir(context.Background(), s.PDFDir)
+			n, err := s.Lib.IngestDir(s.ctx(), s.PDFDir)
 			s.mu.Lock()
 			s.lastAdd += n
+			s.lastErr = "" // the latest pass decides what is shown
 			if err != nil {
 				s.lastErr = err.Error()
 			}
-			if s.rerun {
+			if s.rerun && s.ctx().Err() == nil {
 				s.rerun = false
 				s.mu.Unlock()
 				continue
 			}
-			s.indexing = false
+			s.indexing, s.rerun = false, false
 			s.mu.Unlock()
 			return
 		}
@@ -331,6 +364,13 @@ func (s *Server) ingest(w http.ResponseWriter, _ *http.Request) {
 // and each file is written under a temporary name and renamed, so an ingest never reads a half-written PDF.
 // A file with an existing name replaces it: that is how a library document is updated.
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.up <- struct{}{}:
+		defer func() { <-s.up }()
+	default:
+		http.Error(w, "too many uploads in progress", http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -344,6 +384,11 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "bad upload", http.StatusBadRequest)
 			return
 		}
@@ -351,12 +396,21 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		name := filepath.Base(strings.ReplaceAll(p.FileName(), "\\", "/"))
-		if !strings.EqualFold(filepath.Ext(name), ".pdf") || name == ".pdf" {
-			http.Error(w, "not a .pdf file: "+name, http.StatusBadRequest)
+		if !strings.EqualFold(filepath.Ext(name), ".pdf") || name == ".pdf" || len(name) > 200 || strings.ContainsFunc(name, unicode.IsControl) {
+			http.Error(w, "not an acceptable .pdf file name", http.StatusBadRequest)
 			return
 		}
 		data, err := io.ReadAll(p)
-		if err != nil || !bytes.HasPrefix(data, []byte("%PDF-")) {
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "bad upload", http.StatusBadRequest)
+			return
+		}
+		if !bytes.HasPrefix(data, []byte("%PDF-")) {
 			http.Error(w, "not a PDF: "+name, http.StatusBadRequest)
 			return
 		}
@@ -370,28 +424,62 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	for name, data := range files {
-		if err := writeAtomic(filepath.Join(s.PDFDir, name), data); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := writeAll(s.PDFDir, files); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	s.StartIngest()
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func writeAtomic(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".upload-*")
-	if err != nil {
-		return err
+// writeAll saves every file or none: destinations are checked first, all data goes to temporary names, and only
+// then is everything renamed into place. If a rename still fails, the files this call newly created are
+// removed again (a file that already existed has been replaced by then, which is what an upload of the same
+// name asks for).
+func writeAll(dir string, files map[string][]byte) error {
+	type tmp struct {
+		from, to string
+		existed  bool
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
+	var done []tmp
+	cleanup := func() {
+		for _, t := range done {
+			os.Remove(t.from)
+		}
 	}
-	if err := f.Close(); err != nil {
-		return err
+	for name := range files {
+		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s exists and is not a file", name)
+		}
 	}
-	return os.Rename(f.Name(), path)
+	for name, data := range files {
+		f, err := os.CreateTemp(dir, ".upload-*")
+		if err != nil {
+			cleanup()
+			return err
+		}
+		to := filepath.Join(dir, name)
+		_, statErr := os.Lstat(to)
+		done = append(done, tmp{f.Name(), to, statErr == nil})
+		_, werr := f.Write(data)
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			cleanup()
+			return werr
+		}
+	}
+	for i, t := range done {
+		if err := os.Rename(t.from, t.to); err != nil {
+			for _, u := range done[:i] {
+				if !u.existed {
+					os.Remove(u.to)
+				}
+			}
+			cleanup()
+			return err
+		}
+	}
+	return nil
 }

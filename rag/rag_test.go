@@ -237,3 +237,32 @@ func TestCorruptIndexAndChangedSettingsAreHandled(t *testing.T) {
 		t.Fatalf("temp files left behind: %v", left)
 	}
 }
+
+func TestSearchDoesNotWaitForIngestEither(t *testing.T) {
+	dir := t.TempDir()
+	writePDF(t, filepath.Join(dir, "a.pdf"), "Revenue grew.")
+	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), &fakeEmb{}, "fake", 400, 50)
+	if _, err := l.IngestDir(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	// a second, slow ingest of a new file is in flight while the first library state is searched
+	writePDF(t, filepath.Join(dir, "b.pdf"), "Dolphin facts.")
+	slow := &slowEmb{in: make(chan struct{}, 1), release: make(chan struct{})}
+	l.emb = slow
+	done := make(chan error, 1)
+	go func() { _, err := l.IngestDir(context.Background(), dir); done <- err }()
+	<-slow.in
+	l.emb = &fakeEmb{} // the query embedder; the in-flight ingest already holds the slow one
+	got := make(chan []Hit, 1)
+	go func() { h, _ := l.Search(context.Background(), "revenue", 3, ""); got <- h }()
+	select {
+	case h := <-got:
+		if len(h) == 0 || h[0].Source != "a.pdf" {
+			t.Fatalf("hits %+v", h)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Search blocked while an ingest was embedding")
+	}
+	close(slow.release)
+	<-done
+}

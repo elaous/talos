@@ -317,3 +317,171 @@ func writeTestPDF(t *testing.T, path, text string) {
 		t.Fatal(err)
 	}
 }
+
+func TestUploadIsAllOrNothing(t *testing.T) {
+	h, s := hostServer(t)
+	post := func(parts [][2]string) *httptest.ResponseRecorder {
+		ct, body := multipartBody(parts)
+		return req(h, "POST", "/api/upload", "x", nil, ct, body)
+	}
+	exists := func(n string) bool { _, err := os.Stat(filepath.Join(s.PDFDir, n)); return err == nil }
+	if w := post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {strings.Repeat("n", 300) + ".pdf", "%PDF-1.4 b"}}); w.Code != 400 || exists("ok.pdf") {
+		t.Fatalf("over-long name: %d, ok.pdf saved=%v", w.Code, exists("ok.pdf"))
+	}
+	if w := post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"bad\x01name.pdf", "%PDF-1.4 b"}}); w.Code != 400 || exists("ok.pdf") {
+		t.Fatalf("control character in name: %d", w.Code)
+	}
+	// a name that is already a directory cannot be written: nothing of the upload may remain
+	os.Mkdir(filepath.Join(s.PDFDir, "dir.pdf"), 0o755)
+	if w := post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"dir.pdf", "%PDF-1.4 b"}}); w.Code != 500 {
+		t.Fatalf("unwritable name: %d", w.Code)
+	}
+	for i := 0; i < 20; i++ { // map order is random, so repeat: ok.pdf must never survive
+		post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"dir.pdf", "%PDF-1.4 b"}})
+	}
+	if exists("ok.pdf") {
+		t.Fatal("part of a failed upload was kept")
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.PDFDir, ".upload-*")); len(left) != 0 {
+		t.Fatalf("temp files left: %v", left)
+	}
+}
+
+func TestOversizeUploadIs413(t *testing.T) {
+	h, _ := hostServer(t)
+	ct, body := multipartBody([][2]string{{"big.pdf", "%PDF-1.4 " + strings.Repeat("x", maxUpload)}})
+	if w := req(h, "POST", "/api/upload", "x", nil, ct, body); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("%d", w.Code)
+	}
+}
+
+// recorder keeps what the model was sent.
+type recorder struct {
+	mu  sync.Mutex
+	got [][]llm.Message
+}
+
+func (r *recorder) Chat(_ context.Context, _ string, m []llm.Message) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, append([]llm.Message(nil), m...))
+	return `{"final":"ok"}`, nil
+}
+
+func (r *recorder) first() []llm.Message {
+	for i := 0; i < 500; i++ {
+		r.mu.Lock()
+		if len(r.got) > 0 {
+			defer r.mu.Unlock()
+			return r.got[0]
+		}
+		r.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
+}
+
+func TestHistoryIsCappedByCharacters(t *testing.T) {
+	var cfg config.Config
+	rec := &recorder{}
+	s := &Server{Team: agent.NewTeam(cfg, rec, &rag.Library{}, web.New("", false)), Lib: &rag.Library{}, PDFDir: t.TempDir(),
+		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
+	h := s.Handler()
+	var hist []llm.Message
+	for i := 0; i < 10; i++ {
+		hist = append(hist, llm.Message{Role: "user", Content: strings.Repeat("u", maxMsgLen)})
+	}
+	b, _ := json.Marshal(map[string]any{"question": "q", "history": hist})
+	if w := req(h, "POST", "/api/ask", "x", nil, "application/json", string(b)); w.Code != 202 {
+		t.Fatalf("%d", w.Code)
+	}
+	sent := rec.first()
+	if sent == nil {
+		t.Fatal("no chat call")
+	}
+	n := 0
+	for _, m := range sent {
+		n += len(m.Content)
+	}
+	if n > maxHistChars+8<<10 { // history budget plus the system prompt and question
+		t.Fatalf("%d characters sent", n)
+	}
+}
+
+// gateEmb embeds the first file at once and blocks on the next until the context ends.
+type gateEmb struct{ calls int }
+
+func (g *gateEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	g.calls++
+	if g.calls > 1 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1}
+	}
+	return out, nil
+}
+
+func TestShutdownKeepsWhatIndexingFinished(t *testing.T) {
+	var cfg config.Config
+	dir, idx := t.TempDir(), filepath.Join(t.TempDir(), "i.gob")
+	writeTestPDF(t, filepath.Join(dir, "a.pdf"), "alpha text")
+	writeTestPDF(t, filepath.Join(dir, "b.pdf"), "beta text")
+	lib, _ := rag.Open(idx, &gateEmb{}, "e", 400, 50)
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{Team: agent.NewTeam(cfg, final("x"), lib, web.New("", false)), Lib: lib, PDFDir: dir, Ctx: ctx,
+		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
+	s.Handler()
+	s.StartIngest()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(lib.Sources()) == 0 && time.Now().Before(deadline) { // a.pdf done, b.pdf blocked in Embed
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel() // SIGTERM
+	done := make(chan struct{})
+	go func() { s.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return after the context ended")
+	}
+	again, err := rag.Open(idx, &gateEmb{}, "e", 400, 50)
+	if err != nil || again.Sources()["a.pdf"] == 0 {
+		t.Fatalf("progress was lost on shutdown: %v %v", again.Sources(), err)
+	}
+}
+
+func TestStaleIndexErrorIsClearedByTheNextRun(t *testing.T) {
+	var cfg config.Config
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "bad.pdf"), []byte("%PDF-1.4 broken"), 0o644)
+	lib, _ := rag.Open(filepath.Join(t.TempDir(), "i.gob"), &countEmb{block: func() chan struct{} { c := make(chan struct{}); close(c); return c }()}, "e", 400, 50)
+	s := &Server{Team: agent.NewTeam(cfg, final("x"), lib, web.New("", false)), Lib: lib, PDFDir: dir,
+		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
+	h := s.Handler()
+	status := func() (st struct {
+		Indexing bool
+		Error    string
+	}) {
+		json.Unmarshal(req(h, "GET", "/api/library", "x", nil, "", "").Body.Bytes(), &st)
+		return
+	}
+	wait := func() {
+		for i := 0; i < 500 && status().Indexing; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	s.StartIngest()
+	wait()
+	if !strings.Contains(status().Error, "bad.pdf") {
+		t.Fatalf("error not shown: %q", status().Error)
+	}
+	os.Remove(filepath.Join(dir, "bad.pdf"))
+	s.StartIngest()
+	wait()
+	if e := status().Error; e != "" {
+		t.Fatalf("stale error still shown: %q", e)
+	}
+}
