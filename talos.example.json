@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:8080",
+  "llm": {
+    "backend": "ollama",
+    "base_url": "http://localhost:11434",
+    "model": "qwen2.5:7b-instruct",
+    "temperature": 0.2,
+    "models": {
+      "writer": "llama3.1:8b",
+      "web_researcher": "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+    }
+  },
+  "embed": { "backend": "ollama", "base_url": "http://localhost:11434", "model": "nomic-embed-text" },
+  "web": { "searxng_url": "" }
+}

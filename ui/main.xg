@@ -1,0 +1,303 @@
+//go:build js && wasm
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"syscall/js"
+	"time"
+
+	"github.com/elaous/gojiberry/domrt"
+	"github.com/elaous/gojiberry/domrt/browser"
+	"github.com/elaous/gojiberry/xango"
+)
+
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	IsError bool   `json:"-"`
+}
+
+type step struct{ Agent, Kind, Text string }
+
+type libSource struct {
+	Name     string `json:"name"`
+	Passages int    `json:"passages"`
+}
+
+type libStatus struct {
+	Sources  []libSource `json:"sources"`
+	Indexing bool        `json:"indexing"`
+	Added    int         `json:"added"`
+	Error    string      `json:"error"`
+}
+
+var (
+	client = &http.Client{Transport: browser.FetchTransport{}}
+
+	mu     sync.Mutex // guards the state below; render reads it
+	msgs   []message
+	trace  []step
+	draft  string
+	busy   bool
+	jobID  string
+	lib    libStatus
+	root   *domrt.Root
+	target js.Value
+)
+
+func render() {
+	mu.Lock()
+	node := App()
+	mu.Unlock()
+	if root == nil {
+		root = domrt.Mount(target, node)
+	} else {
+		root.Update(node)
+	}
+}
+
+func call(method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, _ := json.Marshal(in)
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, path, body)
+	if err != nil {
+		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	if out != nil {
+		return json.Unmarshal(data, out)
+	}
+	return nil
+}
+
+func finish(m message) {
+	mu.Lock()
+	msgs = append(msgs, m)
+	busy, jobID = false, ""
+	mu.Unlock()
+	render()
+}
+
+func send() {
+	mu.Lock()
+	q := strings.TrimSpace(draft)
+	if q == "" || busy {
+		mu.Unlock()
+		return
+	}
+	hist := []message{}
+	for _, m := range msgs {
+		if !m.IsError {
+			hist = append(hist, m)
+		}
+	}
+	if len(hist) > 10 {
+		hist = hist[len(hist)-10:]
+	}
+	msgs = append(msgs, message{Role: "user", Content: q})
+	draft, busy, trace = "", true, nil
+	mu.Unlock()
+	render()
+
+	go func() {
+		var id struct{ ID string }
+		if err := call("POST", "/api/ask", map[string]any{"question": q, "history": hist}, &id); err != nil {
+			finish(message{Role: "assistant", Content: err.Error(), IsError: true})
+			return
+		}
+		mu.Lock()
+		jobID = id.ID
+		mu.Unlock()
+		since := 0
+		for {
+			time.Sleep(700 * time.Millisecond)
+			var st struct {
+				Events []struct{ Agent, Kind, Text string }
+				Next   int
+				Done   bool
+				Answer string
+				Error  string
+			}
+			if err := call("GET", fmt.Sprintf("/api/jobs/%s?since=%d", id.ID, since), nil, &st); err != nil {
+				finish(message{Role: "assistant", Content: err.Error(), IsError: true})
+				return
+			}
+			since = st.Next
+			mu.Lock()
+			for _, e := range st.Events {
+				trace = append(trace, step{e.Agent, e.Kind, e.Text})
+			}
+			mu.Unlock()
+			if st.Done {
+				if st.Error != "" {
+					finish(message{Role: "assistant", Content: st.Error, IsError: true})
+				} else {
+					finish(message{Role: "assistant", Content: st.Answer})
+				}
+				return
+			}
+			render()
+		}
+	}()
+}
+
+func stop() {
+	mu.Lock()
+	id := jobID
+	mu.Unlock()
+	if id != "" {
+		go call("POST", "/api/jobs/"+id+"/cancel", nil, nil)
+	}
+}
+
+var libPolling bool
+
+// refreshLibrary reads the library once, and keeps reading while a run is indexing.
+func refreshLibrary() {
+	mu.Lock()
+	if libPolling {
+		mu.Unlock()
+		return
+	}
+	libPolling = true
+	mu.Unlock()
+	go func() {
+		for {
+			var st libStatus
+			err := call("GET", "/api/library", nil, &st)
+			mu.Lock()
+			if err == nil {
+				lib = st
+			}
+			again := err == nil && st.Indexing
+			if !again {
+				libPolling = false
+			}
+			mu.Unlock()
+			render()
+			if !again {
+				return
+			}
+			time.Sleep(1500 * time.Millisecond)
+		}
+	}()
+}
+
+func reindex() {
+	go func() {
+		call("POST", "/api/ingest", nil, nil)
+		time.Sleep(300 * time.Millisecond)
+		refreshLibrary()
+	}()
+}
+
+func Message(m message) xango.Node {
+	cls := "msg " + m.Role
+	if m.IsError {
+		cls += " error"
+	}
+	return <div class={cls}>{m.Content}</div>
+}
+
+func Trace(steps []step, running bool) xango.Node {
+	if len(steps) == 0 {
+		return <div></div>
+	}
+	label := fmt.Sprintf("Agent steps (%d)", len(steps))
+	if running {
+		label += " — working…"
+	}
+	list := func() []xango.Node {
+		var out []xango.Node
+		for _, s := range steps {
+			out = append(out, <div class="step"><b>{s.Agent}</b> {s.Kind}<span class="txt">{s.Text}</span></div>)
+		}
+		return out
+	}()
+	if running { // `open` is a boolean attribute: present means open, so it is set only while working
+		return <details class="trace" open="open"><summary>{label}</summary>{list}</details>
+	}
+	return <details class="trace"><summary>{label}</summary>{list}</details>
+}
+
+func Library(l libStatus) xango.Node {
+	status := fmt.Sprintf("%d PDFs indexed", len(l.Sources))
+	if l.Indexing {
+		status = "Indexing…"
+	} else if l.Error != "" {
+		status = "Index error: " + l.Error
+	}
+	return <aside class="panel">
+		<h2>PDF library</h2>
+		<ul class="docs">{func() []xango.Node {
+			var out []xango.Node
+			for _, s := range l.Sources {
+				out = append(out, <li><span>{s.Name}</span><span class="mut">{fmt.Sprintf("%d", s.Passages)}</span></li>)
+			}
+			return out
+		}()}</ul>
+		<form class="up" method="post" action="/api/upload" enctype="multipart/form-data">
+			<input type="file" name="pdf" accept=".pdf,application/pdf" multiple="multiple" aria-label="Choose PDFs to add" />
+			<button type="submit" class="primary">Upload and index</button>
+		</form>
+		<button type="button" onClick={func(xango.Event) { reindex() }}>Re-index folder</button>
+		<p class="mut" role="status">{status}</p>
+	</aside>
+}
+
+func App() xango.Node {
+	return <div class="app">
+		<main>
+			<h1>Talos</h1>
+			<div class="chat">
+				{func() []xango.Node {
+					var out []xango.Node
+					for _, m := range msgs {
+						out = append(out, Message(m))
+					}
+					return out
+				}()}
+				{Trace(trace, busy)}
+			</div>
+			<div class="composer panel" style="margin-top:12px">
+				<textarea aria-label="Your question" placeholder="Ask about your PDFs or the web…" value={draft}
+					onInput={func(e xango.Event) { draft = xango.EventValue[string](e) }}></textarea>
+				{func() xango.Node {
+					if busy {
+						return <button type="button" onClick={func(xango.Event) { stop() }}>Stop</button>
+					}
+					return <button type="button" class="primary" onClick={func(xango.Event) { send() }}>Send</button>
+				}()}
+			</div>
+		</main>
+		{Library(lib)}
+	</div>
+}
+
+func main() {
+	target = js.Global().Get("document").Call("getElementById", "app")
+	render()
+	refreshLibrary()
+	select {}
+}
