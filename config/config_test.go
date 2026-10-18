@@ -112,6 +112,8 @@ func TestLoadEnvRejectsBadValues(t *testing.T) {
 		})
 		if err == nil {
 			t.Errorf("%s=%q was accepted", k, v)
+		} else if !strings.Contains(err.Error(), "TALOS_*") {
+			t.Errorf("%s=%q: the error does not say the environment may be the cause: %v", k, v, err)
 		}
 	}
 }

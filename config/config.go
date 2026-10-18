@@ -83,7 +83,10 @@ func LoadEnv(path string, getenv func(string) string) (Config, error) {
 		return c, err
 	}
 	c.ApplyEnv(getenv)
-	return c, c.Validate()
+	if err := c.Validate(); err != nil {
+		return c, fmt.Errorf("invalid settings (the config file with the TALOS_* environment variables applied): %w", err)
+	}
+	return c, nil
 }
 
 // ApplyEnv overlays the few settings that differ between machines, so a container needs no edited JSON:
