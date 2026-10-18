@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/elaous/talos/agent"
@@ -40,7 +42,7 @@ func run(cfgPath string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", cfgPath, err)
 	}
-	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature)
+	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature, cfg.LLM.NumCtx)
 	if err != nil {
 		return err
 	}
@@ -56,7 +58,7 @@ func run(cfgPath string, args []string) error {
 	if len(args) > 0 {
 		cmd = args[0]
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	switch cmd {
@@ -80,10 +82,11 @@ func run(cfgPath string, args []string) error {
 			return fmt.Errorf("the UI is not built (%s/main.wasm missing): run `make ui`", cfg.UIDir)
 		}
 		s := &server.Server{
-			Team:   agent.NewTeam(cfg, chat, lib, web.New(cfg.Web.SearxngURL, cfg.Web.AllowPrivate)),
-			Lib:    lib,
-			PDFDir: cfg.PDFDir,
-			UI:     ui,
+			Team:         agent.NewTeam(cfg, chat, lib, web.New(cfg.Web.SearxngURL, cfg.Web.AllowPrivate)),
+			Lib:          lib,
+			PDFDir:       cfg.PDFDir,
+			UI:           ui,
+			AllowedHosts: allowedHosts(cfg),
 		}
 		srv := &http.Server{Addr: cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 		go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
@@ -94,4 +97,24 @@ func run(cfgPath string, args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown command %q (serve, ingest, ask)", cmd)
+}
+
+// allowedHosts is the set of Host names the server answers to: the listen host and any configured names. On a
+// wildcard listen address with none configured it is empty, which turns the check off (any name reaches it).
+func allowedHosts(cfg config.Config) []string {
+	hosts := append([]string(nil), cfg.AllowedHosts...)
+	h, _, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		return hosts
+	}
+	switch h {
+	case "", "0.0.0.0", "::":
+		if len(hosts) == 0 {
+			log.Printf("warning: listening on all interfaces without allowed_hosts; the Host check is off and there is no login")
+			return nil
+		}
+	default:
+		hosts = append(hosts, h)
+	}
+	return append(hosts, "localhost", "127.0.0.1", "::1")
 }

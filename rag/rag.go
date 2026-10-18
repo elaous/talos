@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/elaous/gojiberry/pdftext"
 	"github.com/elaous/talos/llm"
@@ -33,19 +35,29 @@ type Hit struct {
 }
 
 type Library struct {
-	mu       sync.RWMutex
-	path     string
-	emb      llm.Embedder
-	size     int
-	overlap  int
-	Chunks   []Chunk
-	Files    map[string]string // file name -> content hash, so unchanged PDFs are skipped
-	EmbModel string            // vectors from a different embedding model are not comparable
+	mu      sync.RWMutex // guards chunks and files; never held across a network call
+	ingest  sync.Mutex   // serializes IngestDir runs
+	path    string
+	emb     llm.Embedder
+	size    int
+	overlap int
+	key     string // embedding model + chunk settings: an index built under another key is not reused
+	chunks  []Chunk
+	files   map[string]string // file name -> content hash, so unchanged PDFs are skipped
 }
 
-// Open loads the index at path, or starts an empty one.
+// diskIndex is what is saved: Library's own fields are unexported so callers cannot mutate them unlocked.
+type diskIndex struct {
+	Key    string
+	Chunks []Chunk
+	Files  map[string]string
+}
+
+// Open loads the index at path, or starts an empty one. embModel names the embedding model: vectors from
+// another model, or chunks cut with other settings, are not comparable, so a mismatch starts a fresh index.
 func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap int) (*Library, error) {
-	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, Files: map[string]string{}, EmbModel: embModel}
+	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{},
+		key: fmt.Sprintf("%s|%d|%d", embModel, chunkChars, overlap)}
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return l, nil
@@ -54,37 +66,43 @@ func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap in
 		return nil, err
 	}
 	defer f.Close()
-	var saved Library
+	var saved diskIndex
 	if err := gob.NewDecoder(f).Decode(&saved); err != nil {
 		return nil, fmt.Errorf("rag: %s is unreadable (delete it to re-index): %w", path, err)
 	}
-	if saved.EmbModel != embModel {
-		return l, nil // different embeddings: start over rather than mix spaces
+	if saved.Key != l.key {
+		return l, nil
 	}
-	l.Chunks, l.Files = saved.Chunks, saved.Files
-	if l.Files == nil {
-		l.Files = map[string]string{}
+	l.chunks = saved.Chunks
+	if saved.Files != nil {
+		l.files = saved.Files
 	}
 	return l, nil
 }
 
+// save writes the index atomically (temp file in the same directory, fsync, rename). Caller holds l.mu.
 func (l *Library) save() error {
-	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+	dir := filepath.Dir(l.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := l.path + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(dir, filepath.Base(l.path)+".tmp*")
 	if err != nil {
 		return err
 	}
-	if err := gob.NewEncoder(f).Encode(l); err != nil {
+	defer os.Remove(f.Name()) // a no-op once renamed
+	if err := gob.NewEncoder(f).Encode(diskIndex{l.key, l.chunks, l.files}); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
 		f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, l.path)
+	return os.Rename(f.Name(), l.path)
 }
 
 // Split cuts text into overlapping windows of about size bytes, breaking at a space where it can.
@@ -93,7 +111,7 @@ func Split(text string, size, overlap int) []string {
 	if size <= 0 {
 		size = 1200
 	}
-	if overlap < 0 || overlap >= size {
+	if overlap < 0 || overlap > size/2 { // a larger overlap makes the number of chunks explode
 		overlap = size / 6
 	}
 	var out []string
@@ -102,6 +120,12 @@ func Split(text string, size, overlap int) []string {
 		if end < len(text) {
 			if i := strings.LastIndexByte(text[start:end], ' '); i > size/2 {
 				end = start + i
+			}
+			for end > start && !utf8.RuneStart(text[end]) { // never cut inside a UTF-8 sequence
+				end--
+			}
+			for end == start || (end < len(text) && !utf8.RuneStart(text[end])) { // a rune wider than size: take it whole
+				end++
 			}
 		}
 		if s := strings.TrimSpace(text[start:end]); s != "" {
@@ -118,63 +142,95 @@ func Split(text string, size, overlap int) []string {
 	return out
 }
 
-// IngestDir indexes every PDF under dir that is new or changed and drops those that are gone.
-// It returns how many chunks it added.
+// IngestDir indexes every PDF under dir that is new or changed and drops those that are gone. It returns how
+// many chunks it added. A file that cannot be indexed (scanned, encrypted, corrupt) is reported in the
+// returned error, which joins one error per file, but never stops the others. Searches keep working while it
+// runs: the lock is taken only to swap in a finished file, never across the (slow) embedding calls.
 func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.ingest.Lock()
+	defer l.ingest.Unlock()
+	l.mu.RLock()
+	known := make(map[string]string, len(l.files))
+	for k, v := range l.files {
+		known[k] = v
+	}
+	l.mu.RUnlock()
+
 	seen := map[string]bool{}
+	var errs []error
 	added := 0
-	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".pdf") {
+	walkErr := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
 			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".pdf") {
+			return nil
 		}
 		name, _ := filepath.Rel(dir, p)
 		seen[name] = true
 		data, err := os.ReadFile(p)
 		if err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			return nil
 		}
 		sum := sha256.Sum256(data)
 		h := hex.EncodeToString(sum[:])
-		if l.Files[name] == h {
+		if known[name] == h {
 			return nil
 		}
-		n, err := l.addPDF(ctx, name, data)
+		fresh, err := l.embedPDF(ctx, name, data)
 		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			return nil
 		}
-		l.Files[name] = h
-		added += n
+		l.mu.Lock()
+		l.drop(name)
+		l.chunks = append(l.chunks, fresh...)
+		l.files[name] = h
+		l.mu.Unlock()
+		added += len(fresh)
 		return nil
 	})
-	if err != nil {
-		_ = l.save() // keep what was indexed before the failure
-		return added, err
+	if walkErr != nil {
+		errs = append(errs, walkErr)
 	}
-	for name := range l.Files {
-		if !seen[name] {
-			l.drop(name)
-			delete(l.Files, name)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if walkErr == nil { // only a complete walk shows which files are gone
+		for name := range l.files {
+			if !seen[name] {
+				l.drop(name)
+				delete(l.files, name)
+			}
 		}
 	}
-	return added, l.save()
+	if err := l.save(); err != nil {
+		errs = append(errs, err)
+	}
+	return added, errors.Join(errs...)
 }
 
+// drop removes a file's chunks. Caller holds l.mu.
 func (l *Library) drop(name string) {
-	kept := l.Chunks[:0]
-	for _, c := range l.Chunks {
+	kept := make([]Chunk, 0, len(l.chunks))
+	for _, c := range l.chunks {
 		if c.Source != name {
 			kept = append(kept, c)
 		}
 	}
-	l.Chunks = kept
+	l.chunks = kept
 }
 
-func (l *Library) addPDF(ctx context.Context, name string, data []byte) (int, error) {
+func (l *Library) embedPDF(ctx context.Context, name string, data []byte) ([]Chunk, error) {
 	pages, err := pdftext.ExtractPagesBytes(data)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var fresh []Chunk
 	var texts []string
@@ -185,21 +241,19 @@ func (l *Library) addPDF(ctx context.Context, name string, data []byte) (int, er
 		}
 	}
 	if len(fresh) == 0 {
-		return 0, fmt.Errorf("no text found (a scanned PDF needs OCR first)")
+		return nil, fmt.Errorf("no text found (a scanned PDF needs OCR first)")
 	}
 	const batch = 32
 	for i := 0; i < len(texts); i += batch {
 		vecs, err := l.emb.Embed(ctx, texts[i:min(i+batch, len(texts))])
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		for j, v := range vecs {
 			fresh[i+j].Vec = normalize(v)
 		}
 	}
-	l.drop(name)
-	l.Chunks = append(l.Chunks, fresh...)
-	return len(fresh), nil
+	return fresh, nil
 }
 
 func normalize(v []float32) []float32 {
@@ -228,7 +282,7 @@ func (l *Library) Search(ctx context.Context, query string, k int, source string
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var hits []Hit
-	for _, c := range l.Chunks {
+	for _, c := range l.chunks {
 		if source != "" && c.Source != source || len(c.Vec) != len(q) {
 			continue
 		}
@@ -253,7 +307,7 @@ func (l *Library) Sources() map[string]int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	m := map[string]int{}
-	for _, c := range l.Chunks {
+	for _, c := range l.chunks {
 		m[c.Source]++
 	}
 	return m

@@ -28,10 +28,10 @@ type Embedder interface {
 }
 
 // NewChat and NewEmbedder pick the client for an endpoint's backend.
-func NewChat(e config.Endpoint, temperature float64) (Chat, error) {
+func NewChat(e config.Endpoint, temperature float64, numCtx int) (Chat, error) {
 	switch e.Backend {
 	case "ollama":
-		return &client{e: e, temp: temperature, ollama: true}, nil
+		return &client{e: e, temp: temperature, numCtx: numCtx, ollama: true}, nil
 	case "openai":
 		return &client{e: e, temp: temperature}, nil
 	}
@@ -39,7 +39,7 @@ func NewChat(e config.Endpoint, temperature float64) (Chat, error) {
 }
 
 func NewEmbedder(e config.Endpoint) (Embedder, error) {
-	c, err := NewChat(e, 0)
+	c, err := NewChat(e, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +49,7 @@ func NewEmbedder(e config.Endpoint) (Embedder, error) {
 type client struct {
 	e      config.Endpoint
 	temp   float64
+	numCtx int // Ollama only
 	ollama bool
 }
 
@@ -76,6 +77,14 @@ func (c *client) post(ctx context.Context, path string, in, out any) error {
 	return json.Unmarshal(data, out)
 }
 
+func (c *client) options() map[string]any {
+	o := map[string]any{"temperature": c.temp}
+	if c.numCtx > 0 {
+		o["num_ctx"] = c.numCtx
+	}
+	return o
+}
+
 func (c *client) Chat(ctx context.Context, model string, msgs []Message) (string, error) {
 	if c.ollama {
 		var r struct {
@@ -83,7 +92,7 @@ func (c *client) Chat(ctx context.Context, model string, msgs []Message) (string
 		}
 		err := c.post(ctx, "/api/chat", map[string]any{
 			"model": model, "messages": msgs, "stream": false,
-			"options": map[string]any{"temperature": c.temp},
+			"options": c.options(),
 		}, &r)
 		return r.Message.Content, err
 	}

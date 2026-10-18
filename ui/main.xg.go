@@ -50,6 +50,7 @@ var (
 	busy   bool
 	jobID  string
 	lib    libStatus
+	note   string
 	root   *domrt.Root
 	target js.Value
 )
@@ -206,11 +207,47 @@ func refreshLibrary() {
 	}()
 }
 
+func setNote(msg string) {
+	mu.Lock()
+	note = msg
+	mu.Unlock()
+	render()
+}
+
 func reindex() {
 	go func() {
-		call("POST", "/api/ingest", nil, nil)
+		if err := call("POST", "/api/ingest", nil, nil); err != nil {
+			setNote("Re-index failed: " + err.Error())
+			return
+		}
+		setNote("")
 		time.Sleep(300 * time.Millisecond)
 		refreshLibrary()
+	}()
+}
+
+// upload posts the chosen files with fetch, so the page (and the conversation in it) stays as it is.
+func upload() {
+	form := js.Global().Get("document").Call("getElementById", "up-form")
+	input := js.Global().Get("document").Call("getElementById", "up-files")
+	if input.Get("files").Get("length").Int() == 0 {
+		setNote("Choose one or more PDFs first.")
+		return
+	}
+	fd := js.Global().Get("FormData").New(form)
+	go func() {
+		setNote("Uploading…")
+		resp, err := browser.FetchOpts("/api/upload", browser.FetchOptions{Method: "POST", BodyValue: fd, Timeout: 5 * time.Minute})
+		switch {
+		case err != nil:
+			setNote("Upload failed: " + err.Error())
+		case !resp.OK:
+			setNote(fmt.Sprintf("Upload refused (HTTP %d): not a PDF, or too large.", resp.Status))
+		default:
+			input.Set("value", "")
+			setNote("")
+			refreshLibrary()
+		}
 	}()
 }
 
@@ -243,7 +280,7 @@ func Trace(steps []step, running bool) xango.Node {
 	return xango.El("details", []xango.Attr{xango.A("class", "trace")}, xango.El("summary", nil, xango.Child(label)), xango.Child(list))
 }
 
-func Library(l libStatus) xango.Node {
+func Library(l libStatus, note string) xango.Node {
 	status := fmt.Sprintf("%d PDFs indexed", len(l.Sources))
 	if l.Indexing {
 		status = "Indexing…"
@@ -256,7 +293,7 @@ func Library(l libStatus) xango.Node {
 			out = append(out, xango.El("li", nil, xango.El("span", nil, xango.Child(s.Name)), xango.El("span", []xango.Attr{xango.A("class", "mut")}, xango.Child(fmt.Sprintf("%d", s.Passages)))))
 		}
 		return out
-	}())), xango.El("form", []xango.Attr{xango.A("class", "up"), xango.A("method", "post"), xango.A("action", "/api/upload"), xango.A("enctype", "multipart/form-data")}, xango.El("input", []xango.Attr{xango.A("type", "file"), xango.A("name", "pdf"), xango.A("accept", ".pdf,application/pdf"), xango.A("multiple", "multiple"), xango.A("aria-label", "Choose PDFs to add")}), xango.El("button", []xango.Attr{xango.A("type", "submit"), xango.A("class", "primary")}, xango.Text("Upload and index"))), xango.El("button", []xango.Attr{xango.A("type", "button"), xango.On("click", func(xango.Event) { reindex() })}, xango.Text("Re-index folder")), xango.El("p", []xango.Attr{xango.A("class", "mut"), xango.A("role", "status")}, xango.Child(status)))
+	}())), xango.El("form", []xango.Attr{xango.A("class", "up"), xango.A("id", "up-form")}, xango.El("input", []xango.Attr{xango.A("type", "file"), xango.A("id", "up-files"), xango.A("name", "pdf"), xango.A("accept", ".pdf,application/pdf"), xango.A("multiple", "multiple"), xango.A("aria-label", "Choose PDFs to add")}), xango.El("button", []xango.Attr{xango.A("type", "button"), xango.A("class", "primary"), xango.On("click", func(xango.Event) { upload() })}, xango.Text("Upload and index"))), xango.El("button", []xango.Attr{xango.A("type", "button"), xango.On("click", func(xango.Event) { reindex() })}, xango.Text("Re-index folder")), xango.El("p", []xango.Attr{xango.A("class", "mut"), xango.A("role", "status")}, xango.Child(status)), xango.El("p", []xango.Attr{xango.A("class", "mut"), xango.A("role", "alert")}, xango.Child(note)))
 }
 
 func App() xango.Node {
@@ -271,7 +308,7 @@ func App() xango.Node {
 			return xango.El("button", []xango.Attr{xango.A("type", "button"), xango.On("click", func(xango.Event) { stop() })}, xango.Text("Stop"))
 		}
 		return xango.El("button", []xango.Attr{xango.A("type", "button"), xango.A("class", "primary"), xango.On("click", func(xango.Event) { send() })}, xango.Text("Send"))
-	}()))), xango.Child(Library(lib)))
+	}()))), xango.Child(Library(lib, note)))
 }
 
 func main() {

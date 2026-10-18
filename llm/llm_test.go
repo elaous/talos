@@ -19,6 +19,9 @@ func TestOllamaChatAndEmbed(t *testing.T) {
 			if in["model"] != "m" || in["stream"] != false {
 				t.Errorf("chat request %v", in)
 			}
+			if o, _ := in["options"].(map[string]any); o["num_ctx"] != float64(4096) {
+				t.Errorf("num_ctx not sent: %v", in["options"])
+			}
 			w.Write([]byte(`{"message":{"role":"assistant","content":"hi"}}`))
 		case "/api/embed":
 			w.Write([]byte(`{"embeddings":[[1,0],[0,1]]}`))
@@ -28,7 +31,7 @@ func TestOllamaChatAndEmbed(t *testing.T) {
 	}))
 	defer srv.Close()
 	e := config.Endpoint{Backend: "ollama", BaseURL: srv.URL, Model: "emb"}
-	c, _ := NewChat(e, 0.1)
+	c, _ := NewChat(e, 0.1, 4096)
 	if got, err := c.Chat(context.Background(), "m", []Message{{"user", "yo"}}); err != nil || got != "hi" {
 		t.Fatalf("%q %v", got, err)
 	}
@@ -52,7 +55,7 @@ func TestOpenAICompatibleOrdersEmbeddingsByIndex(t *testing.T) {
 	}))
 	defer srv.Close()
 	e := config.Endpoint{Backend: "openai", BaseURL: srv.URL, APIKey: "k", Model: "e"}
-	c, _ := NewChat(e, 0)
+	c, _ := NewChat(e, 0, 0)
 	if got, err := c.Chat(context.Background(), "m", nil); err != nil || got != "ok" {
 		t.Fatalf("%q %v", got, err)
 	}
@@ -60,13 +63,13 @@ func TestOpenAICompatibleOrdersEmbeddingsByIndex(t *testing.T) {
 	if v, err := em.Embed(context.Background(), []string{"a", "b"}); err != nil || v[0][0] != 1 || v[1][0] != 2 {
 		t.Fatalf("%v %v", v, err)
 	}
-	if _, err := NewChat(config.Endpoint{Backend: "x"}, 0); err == nil {
+	if _, err := NewChat(config.Endpoint{Backend: "x"}, 0, 0); err == nil {
 		t.Fatal("unknown backend accepted")
 	}
 }
 
 func TestUnreachableServerSaysSo(t *testing.T) {
-	c, _ := NewChat(config.Endpoint{Backend: "ollama", BaseURL: "http://127.0.0.1:1"}, 0)
+	c, _ := NewChat(config.Endpoint{Backend: "ollama", BaseURL: "http://127.0.0.1:1"}, 0, 0)
 	if _, err := c.Chat(context.Background(), "m", nil); err == nil {
 		t.Fatal("no error")
 	}
