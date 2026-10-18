@@ -37,4 +37,4 @@ bin/
 ui/dist/
 data/
 pdfs/
-talos.json
+/talos.json
