@@ -886,3 +886,38 @@ func TestUniqueKeptName(t *testing.T) {
 		t.Fatalf("%v", names)
 	}
 }
+
+func TestUploadsAreRefusedClearlyWhenThePDFFolderIsReadOnly(t *testing.T) {
+	h, s := hostServer(t)
+	probeTemp = func(string, string) (*os.File, error) { return nil, os.ErrPermission }
+	defer func() { probeTemp = os.CreateTemp }()
+	ct, body := multipartBody([][2]string{{"x.pdf", "%PDF-1.4 x"}})
+	w := req(h, "POST", "/api/upload", "x", nil, ct, body)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "not writable") {
+		t.Fatalf("%d %q", w.Code, w.Body)
+	}
+	if left, _ := os.ReadDir(s.PDFDir); len(left) != 0 {
+		t.Fatalf("something was written: %v", left)
+	}
+	// reading is unaffected
+	if w := req(h, "GET", "/api/library", "x", nil, "", ""); w.Code != 200 {
+		t.Fatalf("library: %d", w.Code)
+	}
+	probeTemp = os.CreateTemp
+	if w := req(h, "POST", "/api/upload", "x", nil, ct, body); w.Code != 204 {
+		t.Fatalf("a writable folder must accept the upload: %d", w.Code)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.PDFDir, ".probe-*")); len(left) != 0 {
+		t.Fatalf("probe files left: %v", left)
+	}
+}
+
+// An IPv6 entry is matched by the bracket-free name the Host header carries.
+func TestIPv6AllowedHostMatchesBracketedHostHeader(t *testing.T) {
+	h, _ := hostServer(t, "fd00::5", "Talos.LAN")
+	for host, want := range map[string]int{"[fd00::5]:8080": 200, "[FD00::5]": 200, "talos.lan:8080": 200, "[fd00::6]:8080": 403, "evil.test": 403} {
+		if w := req(h, "GET", "/api/library", host, nil, "", ""); w.Code != want {
+			t.Errorf("Host %s: %d, want %d", host, w.Code, want)
+		}
+	}
+}

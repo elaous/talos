@@ -386,6 +386,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many uploads in progress", http.StatusTooManyRequests)
 		return
 	}
+	if err := probeDir(s.PDFDir); err != nil { // e.g. the folder is mounted read-only
+		http.Error(w, "uploads are disabled: the PDF folder is not writable", http.StatusServiceUnavailable)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
 	// A client that connects and then stalls must not hold an upload slot for ever.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
@@ -450,6 +454,22 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.StartIngest()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// probeTemp is os.CreateTemp; tests replace it, since a test run as root can write anywhere.
+var probeTemp = os.CreateTemp
+
+// probeDir reports whether files can be created in dir (creating the folder if it is missing).
+func probeDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := probeTemp(dir, ".probe-*")
+	if err != nil {
+		return err
+	}
+	f.Close()
+	return os.Remove(f.Name())
 }
 
 // rename is os.Rename; tests replace it to make a late rename fail or to look at the state between steps.

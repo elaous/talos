@@ -42,6 +42,14 @@ The image is small (~33 MB, distroless, non-root), runs with a read-only root fi
 has a health check. If the data folders are not writable, talos says so at start-up instead of at the first upload.
 Without make: `docker build --build-context gojiberry=../gojiberry -t talos:local .` then `docker compose up -d`.
 
+- **Your data.** The library and the index live in the named volumes `talos_talos-pdfs` and `talos_talos-data`
+  (compose project `talos`). `docker compose down` keeps them; **`docker compose down -v` deletes them**, including
+  every uploaded PDF. Back up a volume with
+  `docker run --rm -v talos_talos-pdfs:/v -v "$PWD":/b alpine tar czf /b/pdfs.tgz -C /v .`, and look inside with
+  `docker run --rm -v talos_talos-pdfs:/v alpine ls -l /v`. Folders `./pdfs` and `./data` from an earlier
+  bind-mount setup are not used by `make docker-up`: use `make docker-up-host` to keep using them (or copy their
+  contents into the volumes). A PDF folder mounted read-only (`-v ./library:/pdfs:ro`) works for searching;
+  uploads are then refused with a clear message.
 - **Models.** By default it talks to an Ollama on the host: that Ollama must listen beyond loopback
   (`OLLAMA_HOST=0.0.0.0`). To run Ollama in a container as well:
   `OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up -d --build`, then

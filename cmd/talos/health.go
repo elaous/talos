@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // healthURL is where the server's own front page can be fetched from inside the same container or host: the
@@ -40,23 +43,39 @@ func checkHealth(ctx context.Context, url string) error {
 	return nil
 }
 
-// checkWritable makes sure each folder exists and this process can write in it. In a container the usual cause of
-// failure is a bind-mounted folder that belongs to another user, which would otherwise show up only as a
-// "permission denied" at the first upload or ingest, while the health check stays green.
+// checkWritable makes sure each folder exists and this process can write in it, and says what to do when it
+// cannot. In a container the usual causes are a bind-mounted folder that belongs to another user, a named volume
+// left over from a run as another user, and no mount at all under a read-only root filesystem; without this
+// they would show up only as "permission denied" at the first upload or ingest, with a green health check.
+func checkWritable(dirs ...string) error {
+	for _, d := range dirs {
+		if err := probeWritable(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // createTemp is os.CreateTemp; tests replace it, since a test run as root can write anywhere.
 var createTemp = os.CreateTemp
 
-func checkWritable(dirs ...string) error {
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("%s: %w", d, err)
+func probeWritable(d string) error {
+	err := os.MkdirAll(d, 0o755)
+	if err == nil {
+		var f *os.File
+		if f, err = createTemp(d, ".writable-*"); err == nil {
+			f.Close()
+			os.Remove(f.Name())
+			return nil
 		}
-		f, err := createTemp(d, ".writable-*")
-		if err != nil {
-			return fmt.Errorf("%s is not writable by uid %d: %w\n  with a bind mount the folder must belong to that user: use a named volume, or run the container as the folder's owner (make docker-up-host)", d, os.Getuid(), err)
-		}
-		f.Close()
-		os.Remove(f.Name())
 	}
-	return nil
+	uid, gid := os.Getuid(), os.Getgid()
+	switch {
+	case errors.Is(err, syscall.EROFS):
+		return fmt.Errorf("%s is on a read-only filesystem: %w\n  nothing writable is mounted there; mount a volume or folder at %s (the compose file does)", d, err, d)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%s is not writable by uid %d: %w\n  a bind-mounted folder must belong to that user (chown -R %d:%d on the host, or `make docker-up-host`);\n  a named volume left from a run as another user needs its owner fixed: docker run --rm -v <volume>:/v alpine chown -R %d:%d /v",
+			d, uid, err, uid, gid, uid, gid)
+	}
+	return fmt.Errorf("%s: %w", d, err)
 }
