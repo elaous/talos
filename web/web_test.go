@@ -2,10 +2,12 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -432,4 +434,105 @@ func TestValidateProxiedTargetDirectly(t *testing.T) {
 			t.Errorf("%q was refused: %v", h, err)
 		}
 	}
+}
+
+// Round 7: for plain-http targets net/http spells the host differently than for https, so the request is rebuilt
+// with the validated spelling; what the proxy is asked for is what was checked.
+func TestPlainHTTPTargetsAreSentUnderTheValidatedName(t *testing.T) {
+	proxy, seen := connectProxy(t)
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	for _, u := range []string{"http://localhost。/", "http://LOCALHOST．/p", "http://１０.0.0.1/", "http://127.0.0.1。/"} {
+		c.Fetch(context.Background(), u, 100)
+	}
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("private targets reached the proxy over plain http: %v", got)
+	}
+	for _, u := range []string{"http://EXAMPLE.invalid./x", "http://[2606:4700:4700::1111]:8080/y", "http://Ünï.example.invalid/z", "http://user:pw@203.0.113.9:81/q?a=1"} {
+		c.Fetch(context.Background(), u, 100)
+	}
+	got := seen()
+	sort.Strings(got)
+	want := []string{
+		"GET http://203.0.113.9:81/q?a=1", // the path and query are kept, userinfo is not part of the host
+		"GET http://[2606:4700:4700::1111]:8080/y",
+		"GET http://example.invalid/x",
+		"GET http://xn--n-nga1b.example.invalid/z", // mapped to lower case, then punycoded
+	}
+	sort.Strings(want)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("what the proxy was asked for:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestNumericLookingFirstLabelsAreStillRealSites(t *testing.T) {
+	for _, h := range []string{"0x.org", "0x.example.invalid", "0X.example.invalid", "0xdeadbeef.example.invalid", "1.example.invalid"} {
+		if err := validateProxiedTarget(context.Background(), h); err != nil {
+			t.Errorf("%q was refused: %v", h, err)
+		}
+	}
+	for _, h := range []string{"0x", "0x.0x", "0x.1", "1.0x"} {
+		if err := validateProxiedTarget(context.Background(), h); err == nil {
+			t.Errorf("%q was accepted", h)
+		}
+	}
+}
+
+// Hosts whose IDNA mapping fails: net/http would put the raw UTF-8 on the CONNECT line, so they are refused.
+func TestHostsThatFailIDNAAreRefused(t *testing.T) {
+	for _, h := range []string{"localhost․", "local‍host", "127.0.0.1﹒", "a　b.example.invalid", "x‌.example.invalid"} {
+		if got, err := normalizeHost(h); err == nil {
+			t.Errorf("normalizeHost(%q) = %q, want an error", h, got)
+		}
+		if err := validateProxiedTarget(context.Background(), h); err == nil {
+			t.Errorf("validateProxiedTarget(%q) accepted it", h)
+		}
+	}
+	proxy, seen := connectProxy(t)
+	setProxy(t, proxy.URL)
+	New("", false).Fetch(context.Background(), "https://localhost․/", 100)
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("the proxy received %v", got)
+	}
+}
+
+// The per-proxy transport map is filled on first use: many first requests at once must be safe (run with -race).
+func TestConcurrentFirstUseOfAProxyIsSafe(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if got, err := c.Fetch(context.Background(), fmt.Sprintf("http://203.0.113.%d/", i+1), 100); err != nil || got != "via proxy" {
+				t.Errorf("fetch %d: %q %v", i, got, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if len(*seen) != 40 {
+		t.Fatalf("the proxy saw %d requests", len(*seen))
+	}
+}
+
+func TestIdleConnectionsAreBounded(t *testing.T) {
+	proxy, _ := proxyServer(t)
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	pt := c.http.Transport.(*pageTransport)
+	for name, tr := range map[string]*http.Transport{"direct": pt.direct, "proxied": pt.proxyTransport(mustURL(proxy.URL)), "searx": c.searx.Transport.(*http.Transport), "allow_private": New("", true).http.Transport.(*http.Transport)} {
+		if tr.IdleConnTimeout <= 0 || tr.MaxIdleConns <= 0 || tr.MaxIdleConnsPerHost <= 0 {
+			t.Errorf("%s: idle connections are unbounded: %v %d %d", name, tr.IdleConnTimeout, tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
+		}
+	}
+}
+
+func mustURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }

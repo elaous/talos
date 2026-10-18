@@ -818,3 +818,71 @@ func TestStartupSweepIsExactEvenForOddFolderNames(t *testing.T) {
 		}
 	}
 }
+
+// failRestoreOnce replaces a.pdf and b.pdf, fails the second rename and sabotages the first-placed file so its
+// restore fails too, leaving that file's old copy as the only one.
+func failRestoreOnce(t *testing.T, dir, oldContent string) string {
+	t.Helper()
+	os.RemoveAll(filepath.Join(dir, "a.pdf"))
+	os.RemoveAll(filepath.Join(dir, "b.pdf"))
+	os.WriteFile(filepath.Join(dir, "a.pdf"), []byte(oldContent), 0o644)
+	os.WriteFile(filepath.Join(dir, "b.pdf"), []byte(oldContent), 0o644)
+	calls := 0
+	var first string
+	rename = func(from, to string) error {
+		calls++
+		if calls == 1 {
+			first = to
+			return os.Rename(from, to)
+		}
+		os.Remove(first)
+		os.Mkdir(first, 0o755)
+		os.WriteFile(filepath.Join(first, "x"), []byte("x"), 0o644)
+		return errors.New("disk on fire")
+	}
+	defer func() { rename = os.Rename }()
+	if err := writeAll(dir, map[string][]byte{"a.pdf": []byte("%PDF-1.4 NEW"), "b.pdf": []byte("%PDF-1.4 NEW")}); err == nil {
+		t.Fatal("no error")
+	}
+	return first
+}
+
+func TestASecondFailedRestoreDoesNotOverwriteAnEarlierKeptCopy(t *testing.T) {
+	dir := t.TempDir()
+	const rounds = 12 // only two file names exist, so earlier rounds' kept copies are certain to collide by name
+	for i := 0; i < rounds; i++ {
+		failRestoreOnce(t, dir, fmt.Sprintf("%%PDF-1.4 OLD-%02d", i))
+	}
+	kept, _ := filepath.Glob(filepath.Join(dir, "*"+keptSuffix+"*"))
+	got := map[string]bool{}
+	for _, k := range kept {
+		b, _ := os.ReadFile(k)
+		got[string(b)] = true
+	}
+	for i := 0; i < rounds; i++ {
+		if want := fmt.Sprintf("%%PDF-1.4 OLD-%02d", i); !got[want] {
+			t.Errorf("the kept copy of round %d (%q) was overwritten or lost; %d files kept", i, want, len(kept))
+		}
+	}
+	removeStaleBackups(dir)
+	if again, _ := filepath.Glob(filepath.Join(dir, "*"+keptSuffix+"*")); len(again) != len(kept) {
+		t.Fatalf("the sweep removed kept copies: %d -> %d", len(kept), len(again))
+	}
+}
+
+func TestUniqueKeptName(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "x.pdf")
+	var names []string
+	for i := 0; i < 4; i++ {
+		n := uniqueKeptName(base)
+		if _, err := os.Lstat(n); err == nil {
+			t.Fatalf("%s already exists", n)
+		}
+		os.WriteFile(n, nil, 0o644)
+		names = append(names, filepath.Base(n))
+	}
+	if strings.Join(names, " ") != "x.pdf.recovered~ x.pdf.recovered~2 x.pdf.recovered~3 x.pdf.recovered~4" {
+		t.Fatalf("%v", names)
+	}
+}

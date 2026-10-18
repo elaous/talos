@@ -94,13 +94,13 @@ func New(searxngURL string, allowPrivate bool) *Client {
 	pf := httpproxy.FromEnvironment().ProxyFunc()
 	var page http.RoundTripper
 	if allowPrivate {
-		page = &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }}
+		page = boundIdle(&http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }})
 	} else {
 		page = newPageTransport(pf)
 	}
 	return &Client{SearxngURL: searxngURL,
 		http:  &http.Client{Timeout: 25 * time.Second, Transport: page},
-		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }}}}
+		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }, IdleConnTimeout: 60 * time.Second, MaxIdleConns: 20, MaxIdleConnsPerHost: 2}}}
 }
 
 // pageTransport sends each request either directly (checked dialler) or through the proxy (validated target).
@@ -127,7 +127,7 @@ func newPageTransport(pf func(*url.URL) (*url.URL, error)) *pageTransport {
 		}
 		return nil
 	}}
-	return &pageTransport{pf: pf, direct: &http.Transport{DialContext: checked.DialContext},
+	return &pageTransport{pf: pf, direct: boundIdle(&http.Transport{DialContext: checked.DialContext}),
 		proxied: map[string]*http.Transport{}, plain: &net.Dialer{Timeout: 10 * time.Second}}
 }
 
@@ -137,7 +137,7 @@ func (t *pageTransport) proxyTransport(pu *url.URL) *http.Transport {
 	defer t.mu.Unlock()
 	key := pu.String()
 	if t.proxied[key] == nil {
-		t.proxied[key] = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: t.plain.DialContext}
+		t.proxied[key] = boundIdle(&http.Transport{Proxy: http.ProxyURL(pu), DialContext: t.plain.DialContext})
 	}
 	return t.proxied[key]
 }
@@ -153,7 +153,25 @@ func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err := validateProxiedTarget(r.Context(), r.URL.Hostname()); err != nil {
 		return nil, err
 	}
-	return t.proxyTransport(pu).RoundTrip(r)
+	// Send the proxy the very name that was validated. net/http spells a host differently for http and https
+	// (https maps it with IDNA, http only punycodes it), so without this a name could be checked as one thing and
+	// asked of the proxy as another.
+	h, _ := normalizeHost(r.URL.Hostname()) // validateProxiedTarget has accepted it
+	r2 := r.Clone(r.Context())
+	r2.URL.Host = hostWithPort(h, r.URL.Port())
+	r2.Host = r2.URL.Host
+	return t.proxyTransport(pu).RoundTrip(r2)
+}
+
+// hostWithPort is host[:port], with an IPv6 literal in brackets.
+func hostWithPort(host, port string) string {
+	if port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // normalizeHost spells a host the way net/http does when it sends it on (a pure ASCII host as it is, anything
@@ -231,7 +249,7 @@ func numericLabels(h string) bool {
 		if strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X") {
 			d = p[2:]
 			if d == "" {
-				return true
+				continue // "0x" alone is a number; a host is numeric only if every label is ("0x.org" is a site)
 			}
 			for _, c := range d {
 				if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
@@ -289,6 +307,14 @@ func validateProxiedTarget(ctx context.Context, host string) error {
 		}
 	}
 	return nil
+}
+
+// boundIdle keeps a long-running server from holding a connection per host it ever fetched from.
+func boundIdle(t *http.Transport) *http.Transport {
+	t.IdleConnTimeout = 60 * time.Second
+	t.MaxIdleConns = 20
+	t.MaxIdleConnsPerHost = 2
+	return t
 }
 
 func (c *Client) get(ctx context.Context, hc *http.Client, u string) ([]byte, error) {

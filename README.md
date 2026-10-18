@@ -74,7 +74,8 @@ scripted in tests, so no model is needed.
 - **One process per index.** Run `ingest` only while `serve` is stopped (or use the UI's re-index): two
   processes would overwrite each other's saved index.
 - Files in the PDF folder named `.upload-*` or `*.replaced~` are deleted when the server starts (they are an
-  interrupted upload's leftovers); `*.recovered~` is never touched.
+  interrupted upload's leftovers); `*.recovered~` (and `*.recovered~2`, …) is never touched: it appears next to a PDF when
+  an upload failed and putting the old file back failed too, and is the only copy of that file.
 - A PDF with no text layer (a scan) or one that is corrupt is reported and skipped, and not retried until it
   changes; the rest are still indexed. An embedding-server outage is not held against the PDF: it is retried.
 

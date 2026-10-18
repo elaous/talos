@@ -464,6 +464,18 @@ var (
 // backupSuffix marks the copy of a file that an upload is about to replace.
 const backupSuffix = ".replaced~"
 
+// uniqueKeptName is the first of x.pdf.recovered~, x.pdf.recovered~2, ... that does not exist, so a second failed
+// restore never overwrites the copy an earlier one kept.
+func uniqueKeptName(to string) string {
+	name := to + keptSuffix
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(name); err != nil {
+			return name
+		}
+		name = fmt.Sprintf("%s%s%d", to, keptSuffix, i)
+	}
+}
+
 // keptSuffix marks the only remaining copy of a file whose restore failed. It is never swept.
 const keptSuffix = ".recovered~"
 
@@ -512,7 +524,7 @@ func writeAll(dir string, files map[string][]byte) error {
 				if err := os.Rename(t.backup, t.to); err != nil { // atomically puts the old file back
 					// The restore failed, so this is now the only copy of the old file. Rename it to a name the
 					// startup sweep leaves alone, so it survives for whoever has to put it back by hand.
-					if os.Rename(t.backup, t.to+keptSuffix) == nil {
+					if os.Rename(t.backup, uniqueKeptName(t.to)) == nil {
 						continue
 					}
 					kept[t.backup] = true
