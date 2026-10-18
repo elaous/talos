@@ -455,15 +455,22 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 // rename is os.Rename; tests replace it to make a late rename fail or to look at the state between steps.
 var rename = os.Rename
 
+// link and writeFile are what the backup step uses; tests replace them to make the copy fallback fail.
+var (
+	link      = os.Link
+	writeFile = os.WriteFile
+)
+
 // backupSuffix marks the copy of a file that an upload is about to replace.
 const backupSuffix = ".replaced~"
 
-// writeAll saves every file or none, and a file that is replaced is never missing, even if the process is killed
-// half way: destinations are checked first, all data goes to temporary names, each existing destination gets a
-// hard-linked (else copied) backup, and then every temporary file is renamed over its destination, which is
-// atomic. If any step fails, the files created so far are removed and the backups put back; on success the
-// backups are deleted. A backup left behind by a crash is harmless (the original is still in place) and is
-// removed when the server starts.
+// writeAll saves every file or none, unless the process is killed half way, and a file that is replaced is never
+// missing or half-written: destinations are checked first, all data goes to temporary names, each existing
+// destination gets a hard-linked (else copied) backup, and then every temporary file is renamed over its
+// destination, which is atomic. If any step fails, the files created so far are removed and the backups put
+// back; if a restore itself fails the backup is kept, as the only copy of the old file. On success the backups
+// are deleted. A kill between two renames leaves some files replaced and some not, each of them whole; the
+// leftovers (backups, temporary files) are removed when the server starts.
 func writeAll(dir string, files map[string][]byte) error {
 	type tmp struct{ from, to, backup string }
 	var done []tmp
@@ -495,15 +502,18 @@ func writeAll(dir string, files map[string][]byte) error {
 	}
 	var placed []tmp // destinations already replaced or created
 	undo := func() {
+		kept := map[string]bool{} // backups whose restore failed: they are now the only copy of the old file
 		for i := len(placed) - 1; i >= 0; i-- {
 			if t := placed[i]; t.backup != "" {
-				_ = rename(t.backup, t.to) // atomically puts the old file back
+				if err := os.Rename(t.backup, t.to); err != nil { // atomically puts the old file back
+					kept[t.backup] = true
+				}
 			} else {
 				os.Remove(t.to)
 			}
 		}
 		for _, t := range done {
-			if t.backup != "" {
+			if t.backup != "" && !kept[t.backup] {
 				os.Remove(t.backup)
 			}
 		}
@@ -514,12 +524,13 @@ func writeAll(dir string, files map[string][]byte) error {
 		if _, err := os.Lstat(t.to); err == nil {
 			t.backup = t.to + backupSuffix
 			os.Remove(t.backup)
-			if err := os.Link(t.to, t.backup); err != nil { // no hard links here: copy
+			if err := link(t.to, t.backup); err != nil { // no hard links here: copy
 				old, rerr := os.ReadFile(t.to)
 				if rerr == nil {
-					rerr = os.WriteFile(t.backup, old, 0o644)
+					rerr = writeFile(t.backup, old, 0o644)
 				}
 				if rerr != nil {
+					os.Remove(t.backup) // a partial copy must not survive as a "backup"
 					t.backup = ""
 					undo()
 					return rerr
@@ -544,10 +555,15 @@ func writeAll(dir string, files map[string][]byte) error {
 	return nil
 }
 
-// removeStaleBackups deletes backups that a crashed upload left behind.
+// removeStaleBackups deletes what a crashed upload left behind: backups and temporary files. It lists the folder
+// (no pattern matching, so odd characters in the folder's name cannot disable it) and touches only regular
+// files with those exact markers.
 func removeStaleBackups(dir string) {
-	old, _ := filepath.Glob(filepath.Join(dir, "*"+backupSuffix))
-	for _, p := range old {
-		os.Remove(p)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		n := e.Name()
+		if e.Type().IsRegular() && (strings.HasSuffix(n, backupSuffix) || strings.HasPrefix(n, ".upload-")) {
+			os.Remove(filepath.Join(dir, n))
+		}
 	}
 }

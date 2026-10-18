@@ -197,6 +197,11 @@ func shortenCall(call map[string]any) string {
 		short["args"] = cutValue(args, 500)
 	}
 	b, _ := json.Marshal(short)
+	if len(b) > 4000 { // many mid-sized values add up: keep the shape of the call, not the contents
+		raw, _ := json.Marshal(short["args"])
+		short["args"] = strings.ToValidUTF8(string(raw[:min(len(raw), 1000)]), "") + "…[cut from history]"
+		b, _ = json.Marshal(short)
+	}
 	return string(b)
 }
 
@@ -208,9 +213,17 @@ func cutValue(v any, max int) any {
 		}
 		return x
 	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, e := range x {
-			out[k] = cutValue(e, max)
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // which keys survive must not depend on map order
+		if len(keys) > 50 {
+			keys = keys[:50]
+		}
+		out := make(map[string]any, len(keys))
+		for _, k := range keys {
+			out[cutValue(k, 100).(string)] = cutValue(x[k], max)
 		}
 		return out
 	case []any:

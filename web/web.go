@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/http/httpproxy"
+	"golang.org/x/net/idna"
 )
 
 type Result struct{ Title, URL, Snippet string }
@@ -72,110 +74,198 @@ func BlockedIP(ip netip.Addr) bool {
 	return false
 }
 
-// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses.
+// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses. How depends on whether
+// the request is proxied (HTTP(S)_PROXY and NO_PROXY decide that, per request, so every redirect is judged again):
 //
-// Without a proxy that is checked at connect time, on the address actually dialled, so redirects and DNS tricks
-// cannot get around it. With HTTP(S)_PROXY set, the proxy is dialled instead of the target, so each request's
-// host is resolved and checked before it goes to the proxy. That check is best-effort: the proxy resolves the
-// name again, and a hostile DNS server can answer the two lookups differently, so with a proxy the private
-// address filter cannot be relied on against a determined attacker (it still stops a model from being pointed
-// at 192.168.0.1 or localhost by a page); whether the LAN is reachable then depends on the proxy. A name that
-// only the proxy can resolve is passed through for that reason. The proxy itself may be on a private address,
-// and is dialled by its configured name, which is the only dial exempt from the check.
+//   - Direct requests use a transport whose dialler checks the address it actually connects to. There are no
+//     exemptions, so redirects, DNS tricks and odd spellings of a host cannot get around it, and a proxy's own
+//     address is just another private address.
+//   - Proxied requests use a transport that is fixed to the proxy and can dial nothing else, so it needs no
+//     exemption either. The target is validated first by validateProxiedTarget, which is best-effort: the
+//     proxy resolves the name again, and a hostile DNS server can answer the two lookups differently, so with
+//     a proxy what the LAN exposes depends on the proxy.
 //
 // A model that was fed a hostile page must not be able to reach services on this machine or its network.
 func New(searxngURL string, allowPrivate bool) *Client {
 	plain := &net.Dialer{Timeout: 10 * time.Second}
-	tr := &http.Transport{DialContext: plain.DialContext}
 	pf := httpproxy.FromEnvironment().ProxyFunc()
+	var page http.RoundTripper
 	if allowPrivate {
-		tr.Proxy = func(r *http.Request) (*url.URL, error) { return pf(r.URL) }
+		page = &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }}
 	} else {
-		proxies := map[string]bool{} // the proxies' own addresses, as the transport will dial them
-		for _, probe := range []string{"http://probe.invalid/", "https://probe.invalid/"} {
-			if u, _ := url.Parse(probe); u != nil {
-				if pu, _ := pf(u); pu != nil {
-					proxies[canonicalAddr(pu)] = true
-				}
-			}
-		}
-		tr.Proxy = func(r *http.Request) (*url.URL, error) {
-			pu, err := pf(r.URL)
-			if err != nil {
-				return nil, err
-			}
-			if pu == nil {
-				// Dialled directly (loopback and NO_PROXY targets). A target that is a proxy's own address would
-				// get the exemption below, so it is refused: the proxy's admin port is not a web page.
-				if proxies[canonicalAddr(r.URL)] {
-					return nil, fmt.Errorf("web: refusing to fetch %s: that is the proxy's own address", r.URL.Host)
-				}
-				return nil, nil
-			}
-			if err := checkHost(r.Context(), r.URL.Hostname()); err != nil {
-				return nil, err
-			}
-			return pu, nil
-		}
-		checked := &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			ip, err := netip.ParseAddr(host)
-			if err != nil {
-				return err
-			}
-			if BlockedIP(ip) {
-				return fmt.Errorf("web: refusing to connect to private address %s", ip.Unmap())
-			}
-			return nil
-		}}
-		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// addr is the unresolved host:port. The proxy is dialled by its configured name; every other dial,
-			// including one that merely resolves to the proxy's address, goes through the checking dialer.
-			if proxies[strings.ToLower(addr)] {
-				return plain.DialContext(ctx, network, addr)
-			}
-			return checked.DialContext(ctx, network, addr)
-		}
+		page = newPageTransport(pf)
 	}
 	return &Client{SearxngURL: searxngURL,
-		http:  &http.Client{Timeout: 25 * time.Second, Transport: tr},
+		http:  &http.Client{Timeout: 25 * time.Second, Transport: page},
 		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }}}}
 }
 
-// canonicalAddr is a URL's host:port as the transport dials it, lower-cased, with the scheme's default port.
-func canonicalAddr(u *url.URL) string {
-	port := u.Port()
-	if port == "" {
-		switch u.Scheme {
-		case "https":
-			port = "443"
-		case "socks5", "socks5h":
-			port = "1080"
-		default:
-			port = "80"
-		}
-	}
-	return strings.ToLower(net.JoinHostPort(strings.TrimSuffix(u.Hostname(), "."), port))
+// pageTransport sends each request either directly (checked dialler) or through the proxy (validated target).
+type pageTransport struct {
+	pf      func(*url.URL) (*url.URL, error)
+	direct  *http.Transport
+	proxied map[string]*http.Transport // by proxy URL; each can only ever dial its proxy
 }
 
-// checkHost fails if host is, or resolves to, a non-public address. A name that does not resolve here passes.
-func checkHost(ctx context.Context, host string) error {
-	if ip, err := netip.ParseAddr(host); err == nil {
+func newPageTransport(pf func(*url.URL) (*url.URL, error)) *pageTransport {
+	checked := &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		ip, err := netip.ParseAddr(host)
+		if err != nil {
+			return err
+		}
 		if BlockedIP(ip) {
 			return fmt.Errorf("web: refusing to connect to private address %s", ip.Unmap())
 		}
 		return nil
+	}}
+	t := &pageTransport{pf: pf, direct: &http.Transport{DialContext: checked.DialContext}, proxied: map[string]*http.Transport{}}
+	plain := &net.Dialer{Timeout: 10 * time.Second}
+	for _, probe := range []string{"http://probe.invalid/", "https://probe.invalid/"} { // one proxy per scheme at most
+		u, _ := url.Parse(probe)
+		if pu, _ := pf(u); pu != nil && t.proxied[pu.String()] == nil {
+			t.proxied[pu.String()] = &http.Transport{Proxy: http.ProxyURL(pu), DialContext: plain.DialContext}
+		}
 	}
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	return t
+}
+
+func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	pu, err := t.pf(r.URL)
 	if err != nil {
-		return nil // we cannot resolve it, the proxy may (corporate DNS): its answer is not ours to check
+		return nil, err
+	}
+	if pu == nil { // no proxy for this request (none configured, NO_PROXY, loopback): checked dial
+		return t.direct.RoundTrip(r)
+	}
+	tr := t.proxied[pu.String()]
+	if tr == nil {
+		return nil, fmt.Errorf("web: unexpected proxy %s", pu.Redacted())
+	}
+	if err := validateProxiedTarget(r.Context(), r.URL.Hostname()); err != nil {
+		return nil, err
+	}
+	return tr.RoundTrip(r)
+}
+
+// normalizeHost spells a host the way net/http does when it dials it (IDNA, lower case, no trailing dot), so what
+// is validated is what is connected to: "１２７.0.0.1" and "LOCALHOST." are not new names.
+func normalizeHost(h string) (string, error) {
+	a, err := idna.Lookup.ToASCII(strings.TrimSuffix(h, "."))
+	if err != nil {
+		return "", fmt.Errorf("web: refusing host %q: %w", h, err)
+	}
+	return strings.ToLower(a), nil
+}
+
+// parseLegacyIPv4 reads the forms a C library accepts (inet_aton): 1 to 4 parts, each decimal, 0octal or 0xhex,
+// the last part filling the remaining bytes: "2130706433", "0x7f.1", "127.1", "0177.0.0.1".
+func parseLegacyIPv4(s string) (netip.Addr, bool) {
+	parts := strings.Split(s, ".")
+	if len(parts) > 4 {
+		return netip.Addr{}, false
+	}
+	var vals []uint64
+	for _, p := range parts {
+		if p == "" {
+			return netip.Addr{}, false
+		}
+		base, digits := 10, p
+		switch {
+		case strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X"):
+			base, digits = 16, p[2:]
+		case len(p) > 1 && p[0] == '0':
+			base, digits = 8, p[1:]
+		}
+		v, err := strconv.ParseUint(digits, base, 32)
+		if err != nil {
+			return netip.Addr{}, false
+		}
+		vals = append(vals, v)
+	}
+	var n uint64
+	for i, v := range vals {
+		if i < len(vals)-1 {
+			if v > 255 {
+				return netip.Addr{}, false
+			}
+			n |= v << (8 * (3 - uint(i)))
+		} else {
+			if v >= 1<<(8*(4-uint(i))) {
+				return netip.Addr{}, false
+			}
+			n |= v
+		}
+	}
+	return netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}), true
+}
+
+// numericLabels reports whether every label looks like a number (decimal or 0x hex): such a name is an address in
+// some spelling, never a DNS name.
+func numericLabels(h string) bool {
+	for _, p := range strings.Split(h, ".") {
+		if p == "" {
+			return false
+		}
+		d := p
+		if strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X") {
+			d = p[2:]
+			if d == "" {
+				return true
+			}
+			for _, c := range d {
+				if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+					return false
+				}
+			}
+			continue
+		}
+		for _, c := range d {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validateProxiedTarget is what a proxied request's host must pass before the proxy is asked to connect to it:
+// not localhost, not an address in any spelling that is non-public, and not a name that resolves here to one.
+// A name this machine cannot resolve passes (the proxy may have DNS we do not), which is why it is best-effort.
+func validateProxiedTarget(ctx context.Context, host string) error {
+	h, err := normalizeHost(host)
+	if err != nil {
+		return err
+	}
+	refuse := func(why string) error { return fmt.Errorf("web: refusing to connect to %s: %s", host, why) }
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return refuse("localhost")
+	}
+	if ip, ok := parseLegacyIPv4(h); ok {
+		if BlockedIP(ip) {
+			return refuse("private address " + ip.String())
+		}
+		return nil
+	}
+	if numericLabels(h) {
+		return refuse("an ambiguous numeric address")
+	}
+	if ip, err := netip.ParseAddr(h); err == nil {
+		if BlockedIP(ip) {
+			return refuse("private address " + ip.Unmap().String())
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", h)
+	if err != nil {
+		return nil
 	}
 	for _, ip := range ips {
 		if BlockedIP(ip) {
-			return fmt.Errorf("web: refusing to connect: %s resolves to private address %s", host, ip.Unmap())
+			return refuse("it resolves to private address " + ip.Unmap().String())
 		}
 	}
 	return nil

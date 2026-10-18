@@ -214,3 +214,105 @@ func TestNameOnlyTheProxyCanResolvePassesThrough(t *testing.T) {
 		t.Fatalf("%q %v %v", got, err, *seen)
 	}
 }
+
+// Round 5, blocker 1: a non-ASCII spelling of the proxy's address must not be dialled unchecked. HTTPS_PROXY is
+// left unset so https targets go direct, which is the path where the exemption used to apply.
+func TestNonASCIISpellingOfTheProxyAddressIsRefused(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Write([]byte("<p>proxy</p>"))
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	addr := strings.TrimPrefix(proxy.URL, "http://")
+	port := addr[strings.LastIndex(addr, ":")+1:]
+	c := New("", false)
+	for _, u := range []string{
+		"https://１２７.0.0.1:" + port + "/", // fullwidth digits, which net/http maps to 127
+		"https://127.0.0.1:" + port + "/",
+		"https://LOCALHOST.:" + port + "/",
+		"https://[::ffff:127.0.0.1]:" + port + "/",
+		"http://１２７.0.0.1:" + port + "/", // http goes through the proxy: validated instead
+	} {
+		if _, err := c.Fetch(context.Background(), u, 100); err == nil {
+			t.Errorf("%s was fetched", u)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("the proxy's listener received %d connections or requests meant for a private target", hits)
+	}
+}
+
+// Round 5, blocker 2: names a pure-Go resolver rejects but a C library (and so a local proxy) accepts as loopback.
+func TestLegacyAndLocalhostSpellingsAreRefusedBeforeTheProxy(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	setProxy(t, proxy.URL)
+	c := New("", false)
+	for _, u := range []string{
+		"http://2130706433/", "http://0x7f.1/", "http://127.1/", "http://0177.0.0.1/", "http://0x7f000001/",
+		"http://LOCALHOST./", "http://localhost/", "http://foo.localhost/", "http://１２７.0.0.1/",
+		"http://3232235777/", // 192.168.1.1
+		"http://0xa.0.0.1/",  // 10.0.0.1
+		"http://169.254.169.254/", "http://[::1]/", "http://[::ffff:10.0.0.1]/",
+		"http://0x/", "http://1.2.3.4.5/", // not valid addresses, but not names either
+	} {
+		if _, err := c.Fetch(context.Background(), u, 100); err == nil {
+			t.Errorf("%s was fetched", u)
+		}
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("the proxy was asked for: %v", *seen)
+	}
+	// public addresses in those spellings still work, and so do ordinary names the proxy alone resolves
+	for _, u := range []string{"http://134744072/", "http://0x8.8.8.8/", "http://203.0.113.9/", "http://intranet.corp.invalid/", "http://xn--bcher-kva.example.invalid/"} {
+		if got, err := c.Fetch(context.Background(), u, 100); err != nil || got != "via proxy" {
+			t.Errorf("%s: %q %v", u, got, err)
+		}
+	}
+}
+
+func TestParseLegacyIPv4(t *testing.T) {
+	for in, want := range map[string]string{
+		"2130706433": "127.0.0.1", "0x7f.1": "127.0.0.1", "127.1": "127.0.0.1", "0177.0.0.1": "127.0.0.1",
+		"0x7f000001": "127.0.0.1", "1.2.3.4": "1.2.3.4", "134744072": "8.8.8.8", "0": "0.0.0.0", "10.1": "10.0.0.1",
+		"0300.0250.0.1": "192.168.0.1", "255.255.255.255": "255.255.255.255", "4294967295": "255.255.255.255",
+	} {
+		ip, ok := parseLegacyIPv4(in)
+		if !ok || ip.String() != want {
+			t.Errorf("%s -> %v %v, want %s", in, ip, ok, want)
+		}
+	}
+	for _, in := range []string{"", "1.2.3.4.5", "256.1.1.1", "1.2.3.256", "4294967296", "1..2", "0x", "08", "09.1", "abc", "1.2.3.", "-1", "1.1.65536"} {
+		if ip, ok := parseLegacyIPv4(in); ok {
+			t.Errorf("%q parsed as %v", in, ip)
+		}
+	}
+}
+
+// Without any proxy, every spelling is judged on the address actually dialled.
+func TestDirectFetchesJudgeTheDialledAddress(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<p>secret</p>")) }))
+	defer srv.Close()
+	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	c := New("", false)
+	for _, u := range []string{"http://１２７.0.0.1:" + port, "http://LOCALHOST.:" + port, "http://localhost:" + port, "http://[::1]:" + port} {
+		if got, err := c.Fetch(context.Background(), u, 100); err == nil {
+			t.Errorf("%s: %q", u, got)
+		}
+	}
+}

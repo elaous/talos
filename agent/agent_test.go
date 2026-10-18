@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -316,5 +317,44 @@ func TestDelegatedTasksAreBounded(t *testing.T) {
 	}
 	if len(task) > maxTaskChars+100 || !strings.Contains(task, "task cut") {
 		t.Fatalf("the writer received %d characters", len(task))
+	}
+}
+
+func TestShortenCallBoundsKeysCountAndTotalSize(t *testing.T) {
+	args := map[string]any{strings.Repeat("k", 3_000_000): "v"}
+	for i := 0; i < 400; i++ {
+		args[fmt.Sprintf("key%03d", i)] = strings.Repeat("v", 450) // each under the per-string cut, 180 KB in all
+	}
+	out := shortenCall(map[string]any{"tool": "t", "args": args})
+	if len(out) > 4400 {
+		t.Fatalf("%d bytes kept", len(out))
+	}
+	m, ok := ExtractJSON(out)
+	if !ok || m["tool"] != "t" {
+		t.Fatalf("not a valid call: %.200q", out)
+	}
+	if out != shortenCall(map[string]any{"tool": "t", "args": args}) {
+		t.Fatal("the result depends on map iteration order")
+	}
+	// a modest call is kept whole
+	small := shortenCall(map[string]any{"tool": "t", "args": map[string]any{"a": 1.0, "b": []any{"x"}}})
+	if m, _ := ExtractJSON(small); m["args"].(map[string]any)["a"] != 1.0 {
+		t.Fatalf("small call changed: %s", small)
+	}
+}
+
+func TestCutValueBoundsKeysBeforeAnythingIsMarshalled(t *testing.T) {
+	out := cutValue(map[string]any{strings.Repeat("k", 3_000_000): "v"}, 500).(map[string]any)
+	for k := range out {
+		if len(k) > 130 {
+			t.Fatalf("a %d-byte key survived", len(k))
+		}
+	}
+	big := map[string]any{}
+	for i := 0; i < 500; i++ {
+		big[fmt.Sprintf("k%03d", i)] = i
+	}
+	if got := cutValue(big, 500).(map[string]any); len(got) != 50 || got["k000"] == nil || got["k049"] == nil || got["k050"] != nil {
+		t.Fatalf("%d keys kept, or the wrong ones", len(got))
 	}
 }

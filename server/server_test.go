@@ -742,3 +742,74 @@ func TestUploadsAreSerializedIntoTheLibrary(t *testing.T) {
 		t.Fatalf("%d uploads were writing into the library at once", peak.Load())
 	}
 }
+
+// If the restore of an overwritten file itself fails, its backup is the only copy of the old content: keep it.
+func TestFailedRestoreKeepsTheBackup(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.pdf"), filepath.Join(dir, "b.pdf")
+	os.WriteFile(a, []byte("%PDF-1.4 OLD-A"), 0o644)
+	os.WriteFile(b, []byte("%PDF-1.4 OLD-B"), 0o644)
+	calls := 0
+	var first string
+	rename = func(from, to string) error {
+		calls++
+		if calls == 1 {
+			first = to
+			return os.Rename(from, to)
+		}
+		// the second replacement fails, and the first destination has meanwhile become a non-empty directory,
+		// so putting the first file's backup back cannot work
+		os.Remove(first)
+		os.Mkdir(first, 0o755)
+		os.WriteFile(filepath.Join(first, "x"), []byte("x"), 0o644)
+		return errors.New("disk on fire")
+	}
+	defer func() { rename = os.Rename }()
+	if err := writeAll(dir, map[string][]byte{"a.pdf": []byte("%PDF-1.4 NEW"), "b.pdf": []byte("%PDF-1.4 NEW")}); err == nil {
+		t.Fatal("no error")
+	}
+	got, err := os.ReadFile(first + backupSuffix)
+	want := map[string]string{a: "%PDF-1.4 OLD-A", b: "%PDF-1.4 OLD-B"}[first]
+	if err != nil || string(got) != want {
+		t.Fatalf("the only copy of the old %s was deleted: %q %v", filepath.Base(first), got, err)
+	}
+}
+
+func TestFailedBackupCopyLeavesNoPartialBackup(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.pdf"), []byte("%PDF-1.4 OLD"), 0o644)
+	link = func(string, string) error { return errors.New("no hard links here") }
+	writeFile = func(p string, b []byte, m os.FileMode) error {
+		os.WriteFile(p, b[:4], m)
+		return errors.New("no space left on device")
+	}
+	defer func() { link, writeFile = os.Link, os.WriteFile }()
+	if err := writeAll(dir, map[string][]byte{"a.pdf": []byte("%PDF-1.4 NEW")}); err == nil {
+		t.Fatal("no error")
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*"+backupSuffix)); len(left) != 0 {
+		t.Fatalf("a partial backup survived: %v", left)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a.pdf")); string(b) != "%PDF-1.4 OLD" {
+		t.Fatalf("the original changed: %q", b)
+	}
+}
+
+func TestStartupSweepIsExactEvenForOddFolderNames(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "pdfs [2026] *odd?")
+	os.MkdirAll(dir, 0o755)
+	for n, keep := range map[string]bool{
+		"a.pdf" + backupSuffix: false, ".upload-123": false, "a.pdf": true, "notes.txt": true, "upload-not-hidden": true,
+	} {
+		os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644)
+		_ = keep
+	}
+	os.Mkdir(filepath.Join(dir, "d.pdf"+backupSuffix), 0o755) // a directory is never touched
+	removeStaleBackups(dir)
+	for n, keep := range map[string]bool{"a.pdf" + backupSuffix: false, ".upload-123": false, "a.pdf": true, "notes.txt": true, "upload-not-hidden": true, "d.pdf" + backupSuffix: true} {
+		_, err := os.Stat(filepath.Join(dir, n))
+		if (err == nil) != keep {
+			t.Errorf("%s: exists=%v, want %v", n, err == nil, keep)
+		}
+	}
+}
