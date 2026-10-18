@@ -55,7 +55,7 @@ scripted in tests, so no model is needed.
   target from that check. It opens only URLs from your message or from search results, so a hostile page cannot
   make the model request an attacker URL carrying private text. `web.allow_private` lifts the address check and
   re-enables the proxy; a SearXNG on localhost works without it. If you must use a proxy, that is the cost:
-  `allow_private` switches the address filter off.
+  `allow_private` switches the address filter off. talos logs a note at start when a proxy variable is set and ignored.
 - **Search queries leave the machine.** A model steered by hostile text could put private PDF text into a
   `web_search` query. That is inherent to giving an agent both your documents and web search; use a local
   SearXNG, or remove the web researcher, if it matters.
@@ -68,6 +68,7 @@ scripted in tests, so no model is needed.
 - **One process per index.** Run `ingest` only while `serve` is stopped (or use the UI's re-index): two
   processes would overwrite each other's saved index.
 - A PDF with no text layer (a scan) or one that is corrupt is reported and skipped; the rest are still indexed.
+  It is not re-read on later runs until the file changes (an unreachable embedding server is retried every run).
 
 ## Layout
 

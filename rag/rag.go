@@ -44,20 +44,25 @@ type Library struct {
 	overlap int
 	key     string // embedding model + chunk settings: an index built under another key is not reused
 	chunks  []Chunk
-	files   map[string]string // file name -> content hash, so unchanged PDFs are skipped
+	files   map[string]string  // file name -> content hash, so unchanged PDFs are skipped
+	bad     map[string]badFile // PDFs that cannot be read (scanned, corrupt): not retried until they change
 }
+
+// badFile remembers why a PDF was skipped, for the content hash it had then.
+type badFile struct{ Hash, Msg string }
 
 // diskIndex is what is saved: Library's own fields are unexported so callers cannot mutate them unlocked.
 type diskIndex struct {
 	Key    string
 	Chunks []Chunk
 	Files  map[string]string
+	Bad    map[string]badFile
 }
 
 // Open loads the index at path, or starts an empty one. embModel names the embedding model: vectors from
 // another model, or chunks cut with other settings, are not comparable, so a mismatch starts a fresh index.
 func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap int) (*Library, error) {
-	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{},
+	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{}, bad: map[string]badFile{},
 		key: fmt.Sprintf("%s|%d|%d", embModel, chunkChars, overlap)}
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -78,6 +83,9 @@ func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap in
 	if saved.Files != nil {
 		l.files = saved.Files
 	}
+	if saved.Bad != nil {
+		l.bad = saved.Bad
+	}
 	return l, nil
 }
 
@@ -92,7 +100,7 @@ func (l *Library) save() error {
 		return err
 	}
 	defer os.Remove(f.Name()) // a no-op once renamed
-	if err := gob.NewEncoder(f).Encode(diskIndex{l.key, l.chunks, l.files}); err != nil {
+	if err := gob.NewEncoder(f).Encode(diskIndex{l.key, l.chunks, l.files, l.bad}); err != nil {
 		f.Close()
 		return err
 	}
@@ -155,6 +163,10 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 	for k, v := range l.files {
 		known[k] = v
 	}
+	knownBad := make(map[string]badFile, len(l.bad))
+	for k, v := range l.bad {
+		knownBad[k] = v
+	}
 	l.mu.RUnlock()
 
 	seen := map[string]bool{}
@@ -183,15 +195,25 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 		if known[name] == h {
 			return nil
 		}
-		fresh, err := l.embedPDF(ctx, name, data)
+		if b, ok := knownBad[name]; ok && b.Hash == h { // failed before and has not changed: report, do not redo
+			errs = append(errs, fmt.Errorf("%s: %s", name, b.Msg))
+			return nil
+		}
+		fresh, permanent, err := l.embedPDF(ctx, name, data)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			if permanent { // an unreachable embedding server is not a verdict on the file, so only this is kept
+				l.mu.Lock()
+				l.bad[name] = badFile{h, err.Error()}
+				l.mu.Unlock()
+			}
 			return nil
 		}
 		l.mu.Lock()
+		delete(l.bad, name)
 		l.drop(name)
 		l.chunks = append(l.chunks, fresh...)
 		l.files[name] = h
@@ -217,6 +239,11 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 				delete(l.files, name)
 			}
 		}
+		for name := range l.bad {
+			if !seen[name] {
+				delete(l.bad, name)
+			}
+		}
 	}
 	if err := l.save(); err != nil {
 		errs = append(errs, err)
@@ -235,10 +262,12 @@ func (l *Library) drop(name string) {
 	l.chunks = kept
 }
 
-func (l *Library) embedPDF(ctx context.Context, name string, data []byte) ([]Chunk, error) {
+// embedPDF returns the file's chunks. permanent says a failure is about the file itself (it will fail the
+// same way next time), as opposed to the embedding server being down.
+func (l *Library) embedPDF(ctx context.Context, name string, data []byte) (chunks []Chunk, permanent bool, err error) {
 	pages, err := pdftext.ExtractPagesBytes(data)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	var fresh []Chunk
 	var texts []string
@@ -249,19 +278,19 @@ func (l *Library) embedPDF(ctx context.Context, name string, data []byte) ([]Chu
 		}
 	}
 	if len(fresh) == 0 {
-		return nil, fmt.Errorf("no text found (a scanned PDF needs OCR first)")
+		return nil, true, fmt.Errorf("no text found (a scanned PDF needs OCR first)")
 	}
 	const batch = 32
 	for i := 0; i < len(texts); i += batch {
 		vecs, err := l.emb.Embed(ctx, texts[i:min(i+batch, len(texts))])
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for j, v := range vecs {
 			fresh[i+j].Vec = normalize(v)
 		}
 	}
-	return fresh, nil
+	return fresh, false, nil
 }
 
 func normalize(v []float32) []float32 {

@@ -266,3 +266,56 @@ func TestSearchDoesNotWaitForIngestEither(t *testing.T) {
 	close(slow.release)
 	<-done
 }
+
+type failEmb struct{ fail bool }
+
+func (f *failEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if f.fail {
+		return nil, context.DeadlineExceeded
+	}
+	return (&fakeEmb{}).Embed(ctx, texts)
+}
+
+func TestUnreadablePDFIsRememberedUntilItChanges(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "scan.pdf")
+	os.WriteFile(bad, []byte("%PDF-1.4 not really"), 0o644)
+	idx := filepath.Join(t.TempDir(), "i.gob")
+	l, _ := Open(idx, &fakeEmb{}, "fake", 400, 50)
+	for i := 0; i < 2; i++ { // the second run still reports it, from memory
+		if _, err := l.IngestDir(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "scan.pdf") {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if b, ok := l.bad["scan.pdf"]; !ok || b.Msg == "" {
+		t.Fatalf("failure not remembered: %v", l.bad)
+	}
+	if again, _ := Open(idx, &fakeEmb{}, "fake", 400, 50); len(again.bad) != 1 {
+		t.Fatalf("not persisted: %v", again.bad)
+	}
+	writePDF(t, bad, "Revenue grew.") // fixed: retried, indexed, forgotten
+	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["scan.pdf"] == 0 || len(l.bad) != 0 {
+		t.Fatalf("changed file not retried: %v %v %v", err, l.Sources(), l.bad)
+	}
+	os.Remove(bad)
+	os.WriteFile(bad, []byte("%PDF-1.4 broken again"), 0o644)
+	l.IngestDir(context.Background(), dir)
+	os.Remove(bad)
+	if _, err := l.IngestDir(context.Background(), dir); err != nil || len(l.bad) != 0 {
+		t.Fatalf("entry for a deleted file kept: %v %v", err, l.bad)
+	}
+}
+
+func TestEmbeddingOutageIsNotRememberedAgainstTheFile(t *testing.T) {
+	dir := t.TempDir()
+	writePDF(t, filepath.Join(dir, "a.pdf"), "Revenue grew.")
+	emb := &failEmb{fail: true}
+	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), emb, "fake", 400, 50)
+	if _, err := l.IngestDir(context.Background(), dir); err == nil || len(l.bad) != 0 {
+		t.Fatalf("outage: %v %v", err, l.bad)
+	}
+	emb.fail = false
+	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["a.pdf"] == 0 {
+		t.Fatalf("not retried once the server is back: %v %v", err, l.Sources())
+	}
+}

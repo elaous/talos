@@ -42,6 +42,9 @@ func run(cfgPath string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", cfgPath, err)
 	}
+	if !cfg.Web.AllowPrivate && (os.Getenv("HTTPS_PROXY") != "" || os.Getenv("HTTP_PROXY") != "" || os.Getenv("https_proxy") != "" || os.Getenv("http_proxy") != "") {
+		log.Printf("note: HTTP(S)_PROXY is set but ignored for web search and fetch_url (a proxy would hide the target from the private-address check); set web.allow_private to use it")
+	}
 	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature, cfg.LLM.NumCtx)
 	if err != nil {
 		return err
