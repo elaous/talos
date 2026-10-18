@@ -33,9 +33,13 @@ docker-build: ## build the image as talos:local (DOCKER_BUILD_FLAGS e.g. --secre
 	docker build --build-context gojiberry=$(GOJIBERRY) $(DOCKER_BUILD_FLAGS) -t talos:local .
 
 .PHONY: docker-up
-docker-up: ## run in the background on http://127.0.0.1:8080 (PDFs in ./pdfs, index in ./data)
+docker-up: docker-build ## start on http://127.0.0.1:8080 (PDFs and index in named volumes)
+	GOJIBERRY_DIR=$(GOJIBERRY) docker compose up -d --no-build
+
+.PHONY: docker-up-host
+docker-up-host: docker-build ## like docker-up, but PDFs in ./pdfs and the index in ./data on the host
 	mkdir -p pdfs data
-	TALOS_UID=$$(id -u) TALOS_GID=$$(id -g) GOJIBERRY_DIR=$(GOJIBERRY) docker compose up --build -d
+	TALOS_UID=$$(id -u) TALOS_GID=$$(id -g) GOJIBERRY_DIR=$(GOJIBERRY) docker compose -f docker-compose.yml -f docker-compose.hostdirs.yml up -d --no-build
 
 .PHONY: docker-down
 docker-down:

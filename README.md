@@ -32,27 +32,37 @@ PDFs can also be uploaded in the UI. Indexing is incremental (unchanged files ar
 ```bash
 git clone … talos && git clone … gojiberry   # gojiberry (private) next to talos
 cd talos
-make docker-up                                # builds, then http://127.0.0.1:8080 ; PDFs in ./pdfs, index in ./data
+make docker-up                                # builds, then http://127.0.0.1:8080
 ```
 
-`make docker-up` creates `./pdfs` and `./data`, runs the container as your user (so uploads and the index are
-yours), and builds with gojiberry as a named build context (`GOJIBERRY_DIR`, default `../gojiberry`). The image
-is small (~33 MB, distroless, non-root), runs with a read-only root filesystem and no capabilities, and has a
-health check. Without compose: `docker build --build-context gojiberry=../gojiberry -t talos .`
+It works on a fresh clone with no setup: the PDF library and the index live in named volumes (`talos-pdfs`,
+`talos-data`) that the container's user owns, and you add PDFs with the UI's upload button. To keep them in
+folders on the host instead, `make docker-up-host` (creates `./pdfs` and `./data`, and runs the container as you).
+The image is small (~33 MB, distroless, non-root), runs with a read-only root filesystem and no capabilities, and
+has a health check. If the data folders are not writable, talos says so at start-up instead of at the first upload.
+Without make: `docker build --build-context gojiberry=../gojiberry -t talos:local .` then `docker compose up -d`.
 
 - **Models.** By default it talks to an Ollama on the host: that Ollama must listen beyond loopback
   (`OLLAMA_HOST=0.0.0.0`). To run Ollama in a container as well:
-  `OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up --build`, then
+  `OLLAMA_URL=http://ollama:11434 docker compose --profile ollama up -d --build`, then
   `docker compose exec ollama ollama pull qwen2.5:7b-instruct` (and `nomic-embed-text`). Any OpenAI-compatible
   server works too: mount your own config over `/etc/talos/talos.json` (start from `docker/talos.json`).
-- **Settings without editing JSON:** `TALOS_LLM_BASE_URL`, `TALOS_LLM_MODEL`, `TALOS_EMBED_BASE_URL`,
-  `TALOS_EMBED_MODEL`, `TALOS_ALLOWED_HOSTS`, `TALOS_LISTEN`.
-- **Reachability.** The port is published on `127.0.0.1` only, because talos has no login. To reach it from
-  elsewhere, put an authenticating proxy in front and add the name you use to `TALOS_ALLOWED_HOSTS` (talos
-  refuses to listen on all interfaces without an allow-list; the image is configured that way and relies on the
-  published port being loopback).
-- **Behind a TLS-intercepting proxy** (corporate): pass the proxy CA and address at build time only:
-  `make docker-build DOCKER_BUILD_FLAGS="--secret id=cacert,src=ca.pem --build-arg HTTPS_PROXY=http://proxy:3128"`.
+- **Settings without editing JSON** (they override the file; bad values are rejected at start-up):
+  `TALOS_LLM_BASE_URL`, `TALOS_LLM_MODEL`, `TALOS_EMBED_BASE_URL`, `TALOS_EMBED_MODEL`, `TALOS_ALLOWED_HOSTS`
+  (bare host names, no port), `TALOS_LISTEN` (leave it as `:8080` in a container: a loopback address inside the
+  container makes the published port unreachable).
+- **Who can reach it. This matters.** talos has no login. The compose file publishes the port on `127.0.0.1`
+  only, and **that is the only thing protecting it**: `allowed_hosts` stops a web page in your browser from
+  reaching it through DNS rebinding, but not a client that sets its own `Host` header. So
+  `docker run -p 8080:8080 talos` (or editing the port to `8080:8080` / `0.0.0.0:8080:8080`) exposes an
+  unauthenticated agent that can read your library, upload files and fetch URLs, to everyone who can reach the
+  machine. Put an authenticating reverse proxy in front before publishing it anywhere else, and add the name
+  you use to `TALOS_ALLOWED_HOSTS`.
+- **Behind a TLS-intercepting proxy** (corporate): pass the proxy CA and address at build time only; `make
+  docker-up` builds first, so the flags apply to it as well:
+  `make docker-up DOCKER_BUILD_FLAGS="--secret id=cacert,src=ca.pem --build-arg HTTPS_PROXY=http://proxy:3128"`.
+- **Pinned versions.** The Go build image is the `golang:1.26` series; the Ollama image in the compose file is
+  pinned to a release. Update them deliberately.
 
 ## Models: Ollama and Hugging Face
 

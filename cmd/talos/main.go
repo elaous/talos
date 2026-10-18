@@ -54,6 +54,20 @@ func run(cfgPath string, args []string) error {
 		defer cancel()
 		return checkHealth(ctx, u)
 	}
+	cmd := "serve"
+	if len(args) > 0 {
+		cmd = args[0]
+	}
+	switch cmd { // fail at the start, with a clear message, rather than at the first upload or ingest
+	case "serve":
+		if err := checkWritable(cfg.DataDir, cfg.PDFDir); err != nil {
+			return err
+		}
+	case "ingest":
+		if err := checkWritable(cfg.DataDir); err != nil {
+			return err
+		}
+	}
 	chat, err := llm.NewChat(cfg.LLM.Endpoint, cfg.LLM.Temperature, cfg.LLM.NumCtx)
 	if err != nil {
 		return err
@@ -65,10 +79,6 @@ func run(cfgPath string, args []string) error {
 	lib, err := rag.Open(filepath.Join(cfg.DataDir, "index.gob"), emb, cfg.Embed.Backend+":"+cfg.Embed.Model, cfg.ChunkChars, cfg.ChunkOverlap)
 	if err != nil {
 		return err
-	}
-	cmd := "serve"
-	if len(args) > 0 {
-		cmd = args[0]
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -122,7 +132,7 @@ func run(cfgPath string, args []string) error {
 		s.Wait() // an ingest in progress saves what it finished before the process exits
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (serve, ingest, ask)", cmd)
+	return fmt.Errorf("unknown command %q (serve, ingest, ask, healthcheck)", cmd)
 }
 
 // allowedHosts is the set of Host names the server answers to: the listen host, loopback and any configured

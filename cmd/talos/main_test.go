@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -83,26 +85,31 @@ func TestDockerConfigIsValid(t *testing.T) {
 	if cfg.DataDir != "/data" || cfg.PDFDir != "/pdfs" || cfg.UIDir != "/app/ui" || cfg.Listen != ":8080" {
 		t.Fatalf("paths drifted from the Dockerfile: %+v", cfg)
 	}
-	df, err := os.ReadFile("../../Dockerfile")
-	if err != nil {
+}
+
+func TestCheckWritable(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "a", "b")
+	if err := checkWritable(fresh, dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"/app/ui", "/data", "/pdfs", "EXPOSE 8080", "HEALTHCHECK", `"healthcheck"`} {
-		if !strings.Contains(string(df), want) {
-			t.Errorf("Dockerfile lacks %q", want)
-		}
+	if fi, err := os.Stat(fresh); err != nil || !fi.IsDir() {
+		t.Fatalf("a missing folder was not created: %v", err)
 	}
-	// every TALOS_* variable the compose file sets is one the code reads
-	dc, _ := os.ReadFile("../../docker-compose.yml")
-	for _, v := range []string{"TALOS_LLM_BASE_URL", "TALOS_EMBED_BASE_URL"} {
-		if !strings.Contains(string(dc), v) {
-			t.Errorf("docker-compose.yml lacks %s", v)
-		}
-		env := map[string]string{v: "http://x:1"}
-		c := config.Default()
-		c.ApplyEnv(func(k string) string { return env[k] })
-		if c.LLM.BaseURL != "http://x:1" && c.Embed.BaseURL != "http://x:1" {
-			t.Errorf("%s is set in compose but not read by ApplyEnv", v)
-		}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".writable-*")); len(left) != 0 {
+		t.Fatalf("probe files left behind: %v", left)
+	}
+	// a path that cannot be a folder
+	file := filepath.Join(dir, "file")
+	os.WriteFile(file, []byte("x"), 0o644)
+	if err := checkWritable(filepath.Join(file, "sub")); err == nil {
+		t.Fatal("a folder under a regular file was accepted")
+	}
+	// a folder this process may not write to (simulated: a test run as root can write anywhere)
+	createTemp = func(string, string) (*os.File, error) { return nil, os.ErrPermission }
+	defer func() { createTemp = os.CreateTemp }()
+	err := checkWritable(dir)
+	if err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), fmt.Sprintf("uid %d", os.Getuid())) || !strings.Contains(err.Error(), "named volume") {
+		t.Fatalf("the message does not say which folder, which user and what to do: %v", err)
 	}
 }

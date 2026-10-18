@@ -60,3 +60,58 @@ func TestApplyEnv(t *testing.T) {
 		t.Fatalf("the environment did not override only what it names: %+v", c.LLM)
 	}
 }
+
+func TestValidateListenBaseURLsAndAllowedHosts(t *testing.T) {
+	ok := func(mod func(*Config)) error {
+		c := Default()
+		mod(&c)
+		return c.Validate()
+	}
+	if err := ok(func(c *Config) {}); err != nil {
+		t.Fatalf("the defaults must be valid: %v", err)
+	}
+	for name, mod := range map[string]func(*Config){
+		"listen without a port":        func(c *Config) { c.Listen = "localhost" },
+		"listen nonsense":              func(c *Config) { c.Listen = "nonsense" },
+		"llm url without a scheme":     func(c *Config) { c.LLM.BaseURL = "ollama:11434" },
+		"llm url empty":                func(c *Config) { c.LLM.BaseURL = "" },
+		"embed url ftp":                func(c *Config) { c.Embed.BaseURL = "ftp://x" },
+		"embed url without a host":     func(c *Config) { c.Embed.BaseURL = "http://" },
+		"allowed host with a port":     func(c *Config) { c.AllowedHosts = []string{"talos.lan:8080"} },
+		"allowed host with a scheme":   func(c *Config) { c.AllowedHosts = []string{"http://talos.lan"} },
+		"allowed host with a path":     func(c *Config) { c.AllowedHosts = []string{"talos.lan/x"} },
+		"allowed host empty":           func(c *Config) { c.AllowedHosts = []string{""} },
+		"allowed host with whitespace": func(c *Config) { c.AllowedHosts = []string{"talos lan"} },
+	} {
+		if err := ok(mod); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	for name, mod := range map[string]func(*Config){
+		"wildcard listen": func(c *Config) { c.Listen = ":8080" },
+		"ipv6 listen":     func(c *Config) { c.Listen = "[::1]:8080" },
+		"https base url":  func(c *Config) { c.LLM.BaseURL = "https://models.lan/v1" },
+		"host names":      func(c *Config) { c.AllowedHosts = []string{"talos.lan", "localhost", "192.168.1.5", "::1", "[::1]"} },
+	} {
+		if err := ok(mod); err != nil {
+			t.Errorf("%s was refused: %v", name, err)
+		}
+	}
+}
+
+// An environment value that makes the configuration invalid is an error at start-up, not a surprise later.
+func TestLoadEnvRejectsBadValues(t *testing.T) {
+	for k, v := range map[string]string{
+		"TALOS_LISTEN": "nonsense", "TALOS_LLM_BASE_URL": "ollama:11434", "TALOS_EMBED_BASE_URL": "x", "TALOS_ALLOWED_HOSTS": "talos.lan:8080",
+	} {
+		_, err := LoadEnv(filepath.Join(t.TempDir(), "missing.json"), func(name string) string {
+			if name == k {
+				return v
+			}
+			return ""
+		})
+		if err == nil {
+			t.Errorf("%s=%q was accepted", k, v)
+		}
+	}
+}

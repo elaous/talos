@@ -39,12 +39,12 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/talos /app/talos
 COPY --from=build /out/ui /app/ui
 COPY docker/talos.json /etc/talos/talos.json
-# Directories the compose file bind-mounts; they exist (owned by the default user) for plain `docker run` too.
+# The library's folders, owned by the image's user: a named volume mounted here inherits that ownership, so it
+# works with no setup. (No VOLUME instruction: it would leave anonymous volumes behind every `docker run`.)
 COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build --chown=65532:65532 /out/pdfs /pdfs
 WORKDIR /app
 EXPOSE 8080
-VOLUME ["/data", "/pdfs"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD ["/app/talos", "-c", "/etc/talos/talos.json", "healthcheck"]
 ENTRYPOINT ["/app/talos", "-c", "/etc/talos/talos.json"]
