@@ -132,7 +132,7 @@ func (s *Server) hostOK(hostport string) bool {
 	if sh, _, err := net.SplitHostPort(hostport); err == nil {
 		h = sh
 	}
-	h = strings.Trim(strings.ToLower(h), "[]")
+	h = strings.TrimSuffix(strings.Trim(strings.ToLower(h), "[]"), ".") // "localhost." is the same name
 	switch h {
 	case "localhost", "127.0.0.1", "::1":
 		return true

@@ -51,14 +51,14 @@ scripted in tests, so no model is needed.
   (the names you reach it by; talos refuses to start otherwise). It still has no login: put it behind
   something that authenticates if others can reach it.
 - **Web access.** `fetch_url` refuses loopback, LAN, link-local, CGNAT and cloud-metadata addresses (checked at
-  connect time, so redirects and DNS tricks do not help) and never uses `HTTP(S)_PROXY`, which would hide the
-  target from that check. It opens only URLs from your message or from search results, so a hostile page cannot
-  make the model request an attacker URL carrying private text. `web.allow_private` lifts the address check and
-  re-enables the proxy; a SearXNG on localhost works without it. If you must use a proxy, that is the cost:
-  `allow_private` switches the address filter off.
+  connect time, so redirects and DNS tricks do not help). `HTTP(S)_PROXY` is honoured: each target is
+  resolved and checked before it is handed to the proxy (which is trusted and may be on your LAN), leaving only
+  the small window in which the proxy resolves the name again. It opens only URLs from your message or from
+  search results, so a hostile page cannot make the model request an attacker URL carrying private text.
+  `web.allow_private` lifts the address check; a SearXNG on localhost works without it.
 - **Search queries leave the machine.** A model steered by hostile text could put private PDF text into a
-  `web_search` query. That is inherent to giving an agent both your documents and web search; use a local
-  SearXNG, or remove the web researcher, if it matters.
+  `web_search` query. That is inherent to giving an agent both your documents and web search. Use a local
+  SearXNG, or set `"web": {"disabled": true}` to drop the web researcher entirely so nothing leaves the machine.
 - **Prompt injection.** Tool results are fenced as untrusted data, but small models can still be steered by
   hostile text. The agents have no write tools, so the risk is wrong answers, not changed files.
 - **Limits.** 4 questions at once, 100 jobs kept, history and question sizes capped, agent context bounded;
@@ -67,7 +67,8 @@ scripted in tests, so no model is needed.
   run also saves about every 15 seconds.
 - **One process per index.** Run `ingest` only while `serve` is stopped (or use the UI's re-index): two
   processes would overwrite each other's saved index.
-- A PDF with no text layer (a scan) or one that is corrupt is reported and skipped; the rest are still indexed.
+- A PDF with no text layer (a scan) or one that is corrupt is reported and skipped, and not retried until it
+  changes; the rest are still indexed. An embedding-server outage is not held against the PDF: it is retried.
 
 ## Layout
 

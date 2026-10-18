@@ -13,6 +13,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/signintech/gopdf v0.37.0 // indirect
 	golang.org/x/image v0.44.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )
 
 // gojiberry is private; consume it from a sibling checkout (see its README, "Getting Started").

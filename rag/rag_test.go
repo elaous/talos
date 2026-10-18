@@ -2,9 +2,12 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -14,12 +17,12 @@ import (
 )
 
 // fakeEmb maps text to a bag-of-keywords vector, so nearest-neighbour search is checkable without a model.
-type fakeEmb struct{ calls int }
+type fakeEmb struct{ calls atomic.Int32 }
 
 var vocab = []string{"revenue", "dolphin", "kernel"}
 
 func (f *fakeEmb) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	f.calls++
+	f.calls.Add(1)
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
 		v := make([]float32, len(vocab))
@@ -84,13 +87,13 @@ func TestIngestSearchPersistAndSkipUnchanged(t *testing.T) {
 		t.Fatalf("source filter: %+v", only)
 	}
 
-	calls := emb.calls
+	calls := emb.calls.Load()
 	l2, err := Open(idx, emb, "fake", 400, 50) // reload from disk
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again, err := l2.IngestDir(context.Background(), dir); err != nil || again != 0 || emb.calls != calls {
-		t.Fatalf("unchanged PDFs were re-embedded: added %d, calls %d->%d, %v", again, calls, emb.calls, err)
+	if again, err := l2.IngestDir(context.Background(), dir); err != nil || again != 0 || emb.calls.Load() != calls {
+		t.Fatalf("unchanged PDFs were re-embedded: added %d, calls %d->%d, %v", again, calls, emb.calls.Load(), err)
 	}
 	if hits, _ := l2.Search(context.Background(), "revenue", 1, ""); len(hits) != 1 || hits[0].Source != "finance.pdf" {
 		t.Fatalf("after reload: %+v", hits)
@@ -265,4 +268,113 @@ func TestSearchDoesNotWaitForIngestEither(t *testing.T) {
 	}
 	close(slow.release)
 	<-done
+}
+
+// failEmb fails every call, standing in for a model server that is down.
+type failEmb struct{}
+
+func (failEmb) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, errors.New("connection refused")
+}
+
+func TestFailedPDFsAreRememberedOnlyWhenTheFileIsAtFault(t *testing.T) {
+	dir := t.TempDir()
+	idx := filepath.Join(t.TempDir(), "i.gob")
+	bad := filepath.Join(dir, "bad.pdf")
+	os.WriteFile(bad, []byte("%PDF-1.4 broken"), 0o644)
+	writePDF(t, filepath.Join(dir, "good.pdf"), "Revenue grew.")
+
+	l, _ := Open(idx, &fakeEmb{}, "e", 400, 50)
+	_, err := l.IngestDir(context.Background(), dir)
+	if err == nil || !strings.Contains(err.Error(), "bad.pdf") {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, ok := l.bad["bad.pdf"]; !ok {
+		t.Fatal("a corrupt file was not remembered")
+	}
+	// still reported on the next run (from memory, unchanged), and across a restart
+	l2, _ := Open(idx, &fakeEmb{}, "e", 400, 50)
+	if _, ok := l2.bad["bad.pdf"]; !ok {
+		t.Fatal("not persisted")
+	}
+	if _, err := l2.IngestDir(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "bad.pdf") {
+		t.Fatalf("second run lost the error: %v", err)
+	}
+	// replaced by a valid PDF: indexed, and no longer bad
+	writePDF(t, bad, "Dolphin facts.")
+	if _, err := l2.IngestDir(context.Background(), dir); err != nil || l2.Sources()["bad.pdf"] == 0 || len(l2.bad) != 0 {
+		t.Fatalf("repaired file: %v %v %v", err, l2.Sources(), l2.bad)
+	}
+	// removed: forgotten
+	os.WriteFile(bad, []byte("%PDF-1.4 broken again"), 0o644)
+	l2.IngestDir(context.Background(), dir)
+	os.Remove(bad)
+	l2.IngestDir(context.Background(), dir)
+	if len(l2.bad) != 0 {
+		t.Fatalf("bad entry for a deleted file kept: %v", l2.bad)
+	}
+
+	// a down model server is not the file's fault: nothing is remembered, and the next run retries
+	dir2 := t.TempDir()
+	writePDF(t, filepath.Join(dir2, "ok.pdf"), "Revenue grew.")
+	l3, _ := Open(filepath.Join(t.TempDir(), "i.gob"), failEmb{}, "e", 400, 50)
+	if _, err := l3.IngestDir(context.Background(), dir2); err == nil {
+		t.Fatal("embedding failure not reported")
+	}
+	if len(l3.bad) != 0 {
+		t.Fatalf("an embedding outage marked the PDF bad: %v", l3.bad)
+	}
+	l3.emb = &fakeEmb{}
+	if _, err := l3.IngestDir(context.Background(), dir2); err != nil || l3.Sources()["ok.pdf"] == 0 {
+		t.Fatalf("not retried after the outage: %v %v", err, l3.Sources())
+	}
+}
+
+func TestSnapshotIsIndependentOfLaterChanges(t *testing.T) {
+	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), &fakeEmb{}, "e", 400, 50)
+	l.chunks = []Chunk{{Source: "a.pdf", Text: "x"}}
+	l.files["a.pdf"] = "h"
+	snap := l.snapshot()
+	l.chunks = append(l.chunks, Chunk{Source: "b.pdf"})
+	l.files["b.pdf"] = "h2"
+	l.drop("a.pdf")
+	if len(snap.Chunks) != 1 || snap.Chunks[0].Source != "a.pdf" || len(snap.Files) != 1 {
+		t.Fatalf("snapshot changed: %+v", snap)
+	}
+	if err := l.save(snap); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSearchDuringSaveAndIngestIsRaceFree(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c"} {
+		writePDF(t, filepath.Join(dir, n+".pdf"), "Revenue "+n)
+	}
+	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), &fakeEmb{}, "e", 400, 50)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					l.Search(context.Background(), "revenue", 3, "")
+					l.Sources()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		os.Remove(filepath.Join(dir, "c.pdf"))
+		l.IngestDir(context.Background(), dir)
+		writePDF(t, filepath.Join(dir, "c.pdf"), "Revenue c again "+strings.Repeat("x", i))
+		l.IngestDir(context.Background(), dir)
+	}
+	close(stop)
+	wg.Wait()
 }

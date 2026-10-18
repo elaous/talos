@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -58,16 +59,6 @@ func TestBlockedIP(t *testing.T) {
 	}
 }
 
-func TestPageFetchesNeverUseAProxy(t *testing.T) {
-	// A proxy would be dialled instead of the target, so the private-address check would see only the proxy.
-	if New("", false).http.Transport.(*http.Transport).Proxy != nil {
-		t.Fatal("page fetches use a proxy")
-	}
-	if New("", true).http.Transport.(*http.Transport).Proxy == nil {
-		t.Fatal("with allow_private the environment proxy should apply")
-	}
-}
-
 func TestLocalSearxngWorksWithoutOpeningFetchURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/search" {
@@ -84,5 +75,54 @@ func TestLocalSearxngWorksWithoutOpeningFetchURL(t *testing.T) {
 	}
 	if _, err := c.Fetch(context.Background(), srv.URL+"/page", 100); err == nil {
 		t.Fatal("fetch_url reached the same loopback server")
+	}
+}
+
+// proxyServer records the requests that reach it, like an HTTP proxy would see them.
+func proxyServer(t *testing.T) (*httptest.Server, *[]string) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.String())
+		mu.Unlock()
+		w.Write([]byte("<p>via proxy</p>"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+func TestProxyIsUsedButTargetsAreStillChecked(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	c := New("", false)
+
+	// a public address goes through the proxy, which itself is on loopback and so exempt from the check
+	got, err := c.Fetch(context.Background(), "http://203.0.113.9/page", 100)
+	if err != nil || got != "via proxy" || len(*seen) != 1 || (*seen)[0] != "http://203.0.113.9/page" {
+		t.Fatalf("public target via proxy: %q %v %v", got, err, *seen)
+	}
+	// private targets are refused before the proxy is asked, so it cannot be used to reach the LAN
+	for _, u := range []string{"http://10.1.2.3/", "http://192.168.0.1/admin", "http://169.254.169.254/latest/meta-data/", "http://[::1]:9/", "http://100.100.100.200/"} {
+		if _, err := c.Fetch(context.Background(), u, 100); err == nil {
+			t.Errorf("%s was fetched through the proxy", u)
+		}
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("the proxy saw requests for private targets: %v", *seen)
+	}
+}
+
+func TestProxyEnvironmentAppliesWhenPrivateAllowed(t *testing.T) {
+	proxy, seen := proxyServer(t)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	if got, err := New("", true).Fetch(context.Background(), "http://10.1.2.3/x", 100); err != nil || got != "via proxy" || len(*seen) != 1 {
+		t.Fatalf("%q %v %v", got, err, *seen)
 	}
 }

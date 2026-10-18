@@ -142,6 +142,8 @@ func TestDNSRebindingAndCrossSiteAreRefused(t *testing.T) {
 		{"fetch metadata cross-site GET", "GET", "127.0.0.1:8080", map[string]string{"Sec-Fetch-Site": "cross-site"}, 403},
 		{"fetch metadata same-origin", "POST", "127.0.0.1:8080", map[string]string{"Sec-Fetch-Site": "same-origin"}, 202},
 		{"no Origin (curl)", "POST", "[::1]:8080", nil, 202},
+		{"trailing dot is the same name", "GET", "localhost.:8080", nil, 200},
+		{"upper case", "GET", "LOCALHOST:8080", nil, 200},
 	}
 	for _, c := range cases {
 		path, body, ct := "/api/ask", ask, "application/json"

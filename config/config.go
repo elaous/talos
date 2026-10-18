@@ -39,6 +39,7 @@ type Config struct {
 
 	Web struct {
 		SearxngURL   string `json:"searxng_url"`   // empty: DuckDuckGo
+		Disabled     bool   `json:"disabled"`      // no web researcher: nothing leaves the machine, not even search queries
 		AllowPrivate bool   `json:"allow_private"` // let fetch_url reach localhost/LAN addresses (and use HTTP(S)_PROXY)
 	} `json:"web"`
 	UIDir string `json:"ui_dir"`

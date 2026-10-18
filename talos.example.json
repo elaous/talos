@@ -11,5 +11,5 @@
     }
   },
   "embed": { "backend": "ollama", "base_url": "http://localhost:11434", "model": "nomic-embed-text" },
-  "web": { "searxng_url": "" }
+  "web": { "searxng_url": "", "disabled": false }
 }

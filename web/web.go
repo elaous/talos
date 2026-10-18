@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/http/httpproxy"
 )
 
 type Result struct{ Title, URL, Snippet string }
@@ -71,17 +72,41 @@ func BlockedIP(ip netip.Addr) bool {
 	return false
 }
 
-// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses, checked at connect time
-// (so redirects and DNS tricks cannot get around it) with no proxy in between (a proxy would be dialled
-// instead of the target, hiding it from the check): a model that was fed a hostile page must not be able to
-// reach services on this machine or its network.
+// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses. Without a proxy this is
+// checked at connect time, so redirects and DNS tricks cannot get around it. With HTTP(S)_PROXY set the proxy is
+// dialled instead of the target, so each request's host is resolved and checked here before it is handed to
+// the proxy (the proxy resolves it again, which leaves a small rebinding window; the proxy itself is trusted and
+// is exempt from the check, since it is usually on the LAN). A model that was fed a hostile page must not be
+// able to reach services on this machine or its network.
 func New(searxngURL string, allowPrivate bool) *Client {
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	tr := &http.Transport{DialContext: d.DialContext}
+	pf := httpproxy.FromEnvironment().ProxyFunc()
 	if allowPrivate {
-		tr.Proxy = http.ProxyFromEnvironment
+		tr.Proxy = func(r *http.Request) (*url.URL, error) { return pf(r.URL) }
 	} else {
+		proxies := map[string]bool{}
+		for _, probe := range []string{"http://probe.invalid/", "https://probe.invalid/"} {
+			if u, _ := url.Parse(probe); u != nil {
+				if pu, _ := pf(u); pu != nil {
+					proxies[hostPort(pu)] = true
+				}
+			}
+		}
+		tr.Proxy = func(r *http.Request) (*url.URL, error) {
+			pu, err := pf(r.URL)
+			if err != nil || pu == nil {
+				return pu, err
+			}
+			if err := checkHost(r.Context(), r.URL.Hostname()); err != nil {
+				return nil, err
+			}
+			return pu, nil
+		}
 		dc := &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+			if proxies[address] {
+				return nil
+			}
 			host, _, err := net.SplitHostPort(address)
 			if err != nil {
 				return err
@@ -99,7 +124,39 @@ func New(searxngURL string, allowPrivate bool) *Client {
 	}
 	return &Client{SearxngURL: searxngURL,
 		http:  &http.Client{Timeout: 25 * time.Second, Transport: tr},
-		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: d.DialContext, Proxy: http.ProxyFromEnvironment}}}
+		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: d.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }}}}
+}
+
+// hostPort is a proxy URL's address as the dialler sees it, with the scheme's default port filled in.
+func hostPort(u *url.URL) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	port := "80"
+	if u.Scheme == "https" {
+		port = "443"
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
+// checkHost fails if host is, or resolves to, a non-public address.
+func checkHost(ctx context.Context, host string) error {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if BlockedIP(ip) {
+			return fmt.Errorf("web: refusing to connect to private address %s", ip.Unmap())
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return err
+	}
+	for _, ip := range ips {
+		if BlockedIP(ip) {
+			return fmt.Errorf("web: refusing to connect: %s resolves to private address %s", host, ip.Unmap())
+		}
+	}
+	return nil
 }
 
 func (c *Client) get(ctx context.Context, hc *http.Client, u string) ([]byte, error) {

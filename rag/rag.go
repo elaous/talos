@@ -44,20 +44,26 @@ type Library struct {
 	overlap int
 	key     string // embedding model + chunk settings: an index built under another key is not reused
 	chunks  []Chunk
-	files   map[string]string // file name -> content hash, so unchanged PDFs are skipped
+	files   map[string]string  // file name -> content hash, so unchanged PDFs are skipped
+	bad     map[string]badFile // PDFs that could not be indexed, so an unchanged one is not retried every run
+	saveMu  sync.Mutex         // one index write at a time
 }
+
+// badFile remembers why a PDF failed, keyed (in Library.bad) by name, valid while the content hash is unchanged.
+type badFile struct{ Hash, Err string }
 
 // diskIndex is what is saved: Library's own fields are unexported so callers cannot mutate them unlocked.
 type diskIndex struct {
 	Key    string
 	Chunks []Chunk
 	Files  map[string]string
+	Bad    map[string]badFile
 }
 
 // Open loads the index at path, or starts an empty one. embModel names the embedding model: vectors from
 // another model, or chunks cut with other settings, are not comparable, so a mismatch starts a fresh index.
 func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap int) (*Library, error) {
-	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{},
+	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{}, bad: map[string]badFile{},
 		key: fmt.Sprintf("%s|%d|%d", embModel, chunkChars, overlap)}
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
@@ -78,11 +84,31 @@ func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap in
 	if saved.Files != nil {
 		l.files = saved.Files
 	}
+	if saved.Bad != nil {
+		l.bad = saved.Bad
+	}
 	return l, nil
 }
 
-// save writes the index atomically (temp file in the same directory, fsync, rename). Caller holds l.mu.
-func (l *Library) save() error {
+// snapshot copies what save needs. Caller holds l.mu. Chunks are never modified once added (drop builds a new
+// slice), so sharing the slice is safe; the maps are copied.
+func (l *Library) snapshot() diskIndex {
+	d := diskIndex{Key: l.key, Chunks: l.chunks[:len(l.chunks):len(l.chunks)],
+		Files: make(map[string]string, len(l.files)), Bad: make(map[string]badFile, len(l.bad))}
+	for k, v := range l.files {
+		d.Files[k] = v
+	}
+	for k, v := range l.bad {
+		d.Bad[k] = v
+	}
+	return d
+}
+
+// save writes a snapshot atomically (temp file in the same directory, fsync, rename). It takes no library
+// lock, so searches never wait for the disk; call it with a snapshot taken under l.mu.
+func (l *Library) save(d diskIndex) error {
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
 	dir := filepath.Dir(l.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -92,7 +118,7 @@ func (l *Library) save() error {
 		return err
 	}
 	defer os.Remove(f.Name()) // a no-op once renamed
-	if err := gob.NewEncoder(f).Encode(diskIndex{l.key, l.chunks, l.files}); err != nil {
+	if err := gob.NewEncoder(f).Encode(d); err != nil {
 		f.Close()
 		return err
 	}
@@ -143,6 +169,9 @@ func Split(text string, size, overlap int) []string {
 	return out
 }
 
+// errEmbed marks a failure of the embedding server rather than of the PDF, which is worth retrying next run.
+var errEmbed = errors.New("embedding failed")
+
 // IngestDir indexes every PDF under dir that is new or changed and drops those that are gone. It returns how
 // many chunks it added. A file that cannot be indexed (scanned, encrypted, corrupt) is reported in the
 // returned error, which joins one error per file, but never stops the others. Searches keep working while it
@@ -150,10 +179,22 @@ func Split(text string, size, overlap int) []string {
 func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 	l.ingest.Lock()
 	defer l.ingest.Unlock()
+	l.mu.Lock()
+	if l.files == nil { // a Library that was not made by Open still works
+		l.files = map[string]string{}
+	}
+	if l.bad == nil {
+		l.bad = map[string]badFile{}
+	}
+	l.mu.Unlock()
 	l.mu.RLock()
 	known := make(map[string]string, len(l.files))
 	for k, v := range l.files {
 		known[k] = v
+	}
+	knownBad := make(map[string]badFile, len(l.bad))
+	for k, v := range l.bad {
+		knownBad[k] = v
 	}
 	l.mu.RUnlock()
 
@@ -183,25 +224,39 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 		if known[name] == h {
 			return nil
 		}
+		if b, ok := knownBad[name]; ok && b.Hash == h { // failed before and unchanged: report, do not retry
+			errs = append(errs, fmt.Errorf("%s: %s", name, b.Err))
+			return nil
+		}
 		fresh, err := l.embedPDF(ctx, name, data)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			if !errors.Is(err, errEmbed) { // the file is at fault, not the model server: remember it
+				l.mu.Lock()
+				l.bad[name] = badFile{h, err.Error()}
+				l.mu.Unlock()
+			}
 			return nil
 		}
 		l.mu.Lock()
 		l.drop(name)
 		l.chunks = append(l.chunks, fresh...)
 		l.files[name] = h
+		delete(l.bad, name)
+		var snap *diskIndex
 		if time.Since(lastSave) > 15*time.Second { // a long run keeps its progress if the process is stopped
-			if err := l.save(); err != nil {
-				errs = append(errs, err)
-			}
-			lastSave = time.Now()
+			d := l.snapshot()
+			snap, lastSave = &d, time.Now()
 		}
 		l.mu.Unlock()
+		if snap != nil {
+			if err := l.save(*snap); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		added += len(fresh)
 		return nil
 	})
@@ -209,7 +264,6 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 		errs = append(errs, walkErr)
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if walkErr == nil { // only a complete walk shows which files are gone
 		for name := range l.files {
 			if !seen[name] {
@@ -217,8 +271,15 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 				delete(l.files, name)
 			}
 		}
+		for name := range l.bad {
+			if !seen[name] {
+				delete(l.bad, name)
+			}
+		}
 	}
-	if err := l.save(); err != nil {
+	snap := l.snapshot()
+	l.mu.Unlock()
+	if err := l.save(snap); err != nil {
 		errs = append(errs, err)
 	}
 	return added, errors.Join(errs...)
@@ -255,7 +316,7 @@ func (l *Library) embedPDF(ctx context.Context, name string, data []byte) ([]Chu
 	for i := 0; i < len(texts); i += batch {
 		vecs, err := l.emb.Embed(ctx, texts[i:min(i+batch, len(texts))])
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errEmbed, err)
 		}
 		for j, v := range vecs {
 			fresh[i+j].Vec = normalize(v)

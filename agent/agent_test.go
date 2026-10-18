@@ -186,3 +186,22 @@ func TestCompactBoundsLongHistoryAndReplies(t *testing.T) {
 		t.Error("system prompt or task was touched")
 	}
 }
+
+func TestWebResearcherCanBeDisabled(t *testing.T) {
+	s := &script{replies: []string{`{"final":"ok"}`}}
+	var cfg config.Config
+	cfg.Web.Disabled = true
+	if _, err := NewTeam(cfg, s, &rag.Library{}, web.New("", false)).Ask(context.Background(), "q", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	sys := s.seen[0][0].Content
+	if strings.Contains(sys, "ask_web_researcher") || strings.Contains(sys, "web researcher") || !strings.Contains(sys, "ask_pdf_researcher") {
+		t.Errorf("supervisor still offers web research:\n%s", sys)
+	}
+	s = &script{replies: []string{`{"final":"ok"}`}}
+	cfg.Web.Disabled = false
+	NewTeam(cfg, s, &rag.Library{}, web.New("", false)).Ask(context.Background(), "q", nil, nil)
+	if !strings.Contains(s.seen[0][0].Content, "ask_web_researcher") {
+		t.Error("web researcher missing when enabled")
+	}
+}
