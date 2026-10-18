@@ -36,17 +36,18 @@ type Hit struct {
 }
 
 type Library struct {
-	mu      sync.RWMutex // guards chunks and files; never held across a network call
-	ingest  sync.Mutex   // serializes IngestDir runs
-	path    string
-	emb     llm.Embedder
-	size    int
-	overlap int
-	key     string // embedding model + chunk settings: an index built under another key is not reused
-	chunks  []Chunk
-	files   map[string]string  // file name -> content hash, so unchanged PDFs are skipped
-	bad     map[string]badFile // PDFs that could not be indexed, so an unchanged one is not retried every run
-	saveMu  sync.Mutex         // one index write at a time
+	mu        sync.RWMutex // guards chunks and files; never held across a network call
+	ingest    sync.Mutex   // serializes IngestDir runs
+	path      string
+	emb       llm.Embedder
+	size      int
+	overlap   int
+	key       string // embedding model + chunk settings: an index built under another key is not reused
+	chunks    []Chunk
+	files     map[string]string  // file name -> content hash, so unchanged PDFs are skipped
+	bad       map[string]badFile // PDFs that could not be indexed, so an unchanged one is not retried every run
+	saveMu    sync.Mutex         // one index write at a time
+	saveEvery time.Duration      // how often a long ingest saves its progress (0: 15s)
 }
 
 // badFile remembers why a PDF failed, keyed (in Library.bad) by name, valid while the content hash is unchanged.
@@ -88,6 +89,13 @@ func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap in
 		l.bad = saved.Bad
 	}
 	return l, nil
+}
+
+func (l *Library) saveInterval() time.Duration {
+	if l.saveEvery > 0 {
+		return l.saveEvery
+	}
+	return 15 * time.Second
 }
 
 // snapshot copies what save needs. Caller holds l.mu. Chunks are never modified once added (drop builds a new
@@ -247,7 +255,7 @@ func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 		l.files[name] = h
 		delete(l.bad, name)
 		var snap *diskIndex
-		if time.Since(lastSave) > 15*time.Second { // a long run keeps its progress if the process is stopped
+		if time.Since(lastSave) > l.saveInterval() { // a long run keeps its progress if the process is stopped
 			d := l.snapshot()
 			snap, lastSave = &d, time.Now()
 		}

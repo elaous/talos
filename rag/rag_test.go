@@ -378,3 +378,49 @@ func TestSearchDuringSaveAndIngestIsRaceFree(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// gateAfter embeds the first n calls at once and blocks later ones until the context ends.
+type gateAfter struct {
+	n     int
+	calls atomic.Int32
+}
+
+func (g *gateAfter) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if int(g.calls.Add(1)) > g.n {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1}
+	}
+	return out, nil
+}
+
+func TestLongIngestSavesProgressWhileRunning(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b", "c"} {
+		writePDF(t, filepath.Join(dir, n+".pdf"), "Revenue "+n)
+	}
+	idx := filepath.Join(t.TempDir(), "i.gob")
+	emb := &gateAfter{n: 2}
+	l, _ := Open(idx, emb, "e", 400, 50)
+	l.saveEvery = time.Nanosecond // save after every finished file
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { l.IngestDir(ctx, dir); close(done) }()
+	// c.pdf is blocked in Embed: the run is still going, yet a and b must already be on disk
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if again, err := Open(idx, emb, "e", 400, 50); err == nil && len(again.Sources()) == 2 {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("progress was not saved while the ingest was still running")
+}

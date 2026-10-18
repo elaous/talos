@@ -51,6 +51,7 @@ type Server struct {
 	jobs     map[string]*job
 	indexing bool
 	rerun    bool // files arrived while indexing: run once more when it ends
+	closed   bool // Wait was called: StartIngest refuses
 	lastErr  string
 	lastAdd  int
 }
@@ -64,8 +65,16 @@ const (
 	maxUploads   = 2
 )
 
+// uploadTimeout is how long a whole upload may take to arrive.
+var uploadTimeout = 2 * time.Minute
+
 // Wait blocks until background indexing has stopped (after Ctx is cancelled, at most one file's worth).
-func (s *Server) Wait() { s.wg.Wait() }
+func (s *Server) Wait() {
+	s.mu.Lock()
+	s.closed = true // no new indexing after this: wg.Add must not race with Wait
+	s.mu.Unlock()
+	s.wg.Wait()
+}
 
 func (s *Server) ctx() context.Context {
 	if s.Ctx != nil {
@@ -324,6 +333,10 @@ func (s *Server) library(w http.ResponseWriter, _ *http.Request) {
 // around once more when it ends (so a file saved after its walk is still picked up) and returns false.
 func (s *Server) StartIngest() bool {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
 	if s.indexing {
 		s.rerun = true
 		s.mu.Unlock()
@@ -372,6 +385,8 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
+	// A client that connects and then stalls must not hold an upload slot for ever.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
 	mr, err := r.MultipartReader()
 	if err != nil {
 		http.Error(w, "bad upload", http.StatusBadRequest)
@@ -432,15 +447,14 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeAll saves every file or none: destinations are checked first, all data goes to temporary names, and only
-// then is everything renamed into place. If a rename still fails, the files this call newly created are
-// removed again (a file that already existed has been replaced by then, which is what an upload of the same
-// name asks for).
+// rename is os.Rename; tests replace it to make a late rename fail.
+var rename = os.Rename
+
+// writeAll saves every file or none. Destinations are checked first and all data goes to temporary names; then
+// each file is renamed into place, with a file that already exists moved aside to a backup first. If any step
+// fails, the files created so far are removed and the backups put back, so the library is as it was.
 func writeAll(dir string, files map[string][]byte) error {
-	type tmp struct {
-		from, to string
-		existed  bool
-	}
+	type tmp struct{ from, to, backup string }
 	var done []tmp
 	cleanup := func() {
 		for _, t := range done {
@@ -458,9 +472,7 @@ func writeAll(dir string, files map[string][]byte) error {
 			cleanup()
 			return err
 		}
-		to := filepath.Join(dir, name)
-		_, statErr := os.Lstat(to)
-		done = append(done, tmp{f.Name(), to, statErr == nil})
+		done = append(done, tmp{from: f.Name(), to: filepath.Join(dir, name)})
 		_, werr := f.Write(data)
 		if cerr := f.Close(); werr == nil {
 			werr = cerr
@@ -470,15 +482,37 @@ func writeAll(dir string, files map[string][]byte) error {
 			return werr
 		}
 	}
-	for i, t := range done {
-		if err := os.Rename(t.from, t.to); err != nil {
-			for _, u := range done[:i] {
-				if !u.existed {
-					os.Remove(u.to)
-				}
+	var moved []tmp // renamed into place so far
+	undo := func() {
+		for i := len(moved) - 1; i >= 0; i-- {
+			t := moved[i]
+			os.Remove(t.to)
+			if t.backup != "" {
+				_ = rename(t.backup, t.to)
 			}
-			cleanup()
+		}
+		cleanup()
+	}
+	for _, t := range done {
+		if _, err := os.Lstat(t.to); err == nil { // replacing: keep the old file until everything has worked
+			t.backup = t.to + ".replaced~"
+			if err := rename(t.to, t.backup); err != nil {
+				undo()
+				return err
+			}
+		}
+		if err := rename(t.from, t.to); err != nil {
+			if t.backup != "" {
+				_ = rename(t.backup, t.to)
+			}
+			undo()
 			return err
+		}
+		moved = append(moved, t)
+	}
+	for _, t := range moved {
+		if t.backup != "" {
+			os.Remove(t.backup)
 		}
 	}
 	return nil

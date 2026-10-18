@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -78,6 +79,7 @@ func (a *Agent) emit(kind, text string) {
 // Run works on task, with optional earlier conversation, and returns the final answer.
 func (a *Agent) Run(ctx context.Context, task string, history []llm.Message) (string, error) {
 	msgs := append([]llm.Message{{Role: "system", Content: a.system()}}, history...)
+	taskIdx := len(msgs) // compact never clips the task itself
 	msgs = append(msgs, llm.Message{Role: "user", Content: task})
 	tools := map[string]Tool{}
 	for _, t := range a.Tools {
@@ -125,9 +127,9 @@ func (a *Agent) Run(ctx context.Context, task string, history []llm.Message) (st
 		}
 		a.emit("result", clip(obs, 600))
 		msgs = append(msgs,
-			llm.Message{Role: "assistant", Content: clip(raw, 4000)},
-			llm.Message{Role: "user", Content: "<tool_result>\n" + strings.ReplaceAll(clip(obs, 8000), "</tool_result", "< /tool_result") + "\n</tool_result>\nContinue."})
-		msgs = compact(msgs, maxContextChars)
+			llm.Message{Role: "assistant", Content: shortenCall(call)},
+			llm.Message{Role: "user", Content: "<tool_result>\n" + closingTag.ReplaceAllString(clip(obs, 8000), "< /tool_result") + "\n</tool_result>\nContinue."})
+		msgs = compact(msgs, maxContextChars, taskIdx)
 	}
 	return "", fmt.Errorf("agent %s: unreachable", a.Name)
 }
@@ -183,13 +185,34 @@ func ExtractJSON(s string) (map[string]any, bool) {
 	return nil, false
 }
 
+// closingTag matches any spelling of a fence-closing tag: any case, spaces, and the fullwidth "<".
+var closingTag = regexp.MustCompile(`(?i)[<\x{FF1C}]\s*/\s*tool_?result`)
+
+// shortenCall is the model's own tool call as kept in the conversation: still valid JSON, but with long string
+// arguments (a whole draft passed to the writer, say) cut, so one big call does not crowd out everything else.
+func shortenCall(call map[string]any) string {
+	short := map[string]any{"tool": call["tool"]}
+	if args, ok := call["args"].(map[string]any); ok {
+		cut := make(map[string]any, len(args))
+		for k, v := range args {
+			if str, ok := v.(string); ok && len(str) > 500 {
+				v = strings.ToValidUTF8(str[:500], "") + "…[cut from history]"
+			}
+			cut[k] = v
+		}
+		short["args"] = cut
+	}
+	b, _ := json.Marshal(short)
+	return string(b)
+}
+
 // maxContextChars bounds what one agent sends to the model (about 4 characters per token), so the protocol
 // instructions at the start are not pushed out of a small context window.
 const maxContextChars = 48000
 
-// compact shrinks the oldest tool results until the conversation fits, keeping the system prompt, the task
-// and the most recent exchange intact.
-func compact(msgs []llm.Message, limit int) []llm.Message {
+// compact shrinks the oldest tool results, then older conversation, until it fits, keeping the system prompt,
+// the task (at taskIdx) and the most recent exchange intact.
+func compact(msgs []llm.Message, limit, taskIdx int) []llm.Message {
 	size := func() (n int) {
 		for _, m := range msgs {
 			n += len(m.Content)
@@ -202,7 +225,9 @@ func compact(msgs []llm.Message, limit int) []llm.Message {
 		}
 	}
 	for i := 1; i < len(msgs)-2 && size() > limit; i++ { // still too big: earlier conversation and replies
-		msgs[i].Content = clip(msgs[i].Content, 500)
+		if i != taskIdx {
+			msgs[i].Content = clip(msgs[i].Content, 500)
+		}
 	}
 	return msgs
 }

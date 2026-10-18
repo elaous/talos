@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -486,4 +489,146 @@ func TestStaleIndexErrorIsClearedByTheNextRun(t *testing.T) {
 	if e := status().Error; e != "" {
 		t.Fatalf("stale error still shown: %q", e)
 	}
+}
+
+// gateFirstEmb blocks every call until released, so a pass can be held open.
+type gateFirstEmb struct{ release chan struct{} }
+
+func (g gateFirstEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1}
+	}
+	return out, nil
+}
+
+// The error of a pass must not outlive a rerun that no longer has it: pass 1 fails on bad.pdf while good.pdf
+// is still embedding; bad.pdf is deleted and a rerun is queued; pass 2 is clean.
+func TestRerunClearsTheErrorOfThePassBefore(t *testing.T) {
+	var cfg config.Config
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a-bad.pdf"), []byte("%PDF-1.4 broken"), 0o644)
+	writeTestPDF(t, filepath.Join(dir, "b-good.pdf"), "good text")
+	g := gateFirstEmb{release: make(chan struct{})}
+	lib, _ := rag.Open(filepath.Join(t.TempDir(), "i.gob"), g, "e", 400, 50)
+	s := &Server{Team: agent.NewTeam(cfg, final("x"), lib, web.New("", false)), Lib: lib, PDFDir: dir,
+		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
+	h := s.Handler()
+	s.StartIngest()
+	time.Sleep(100 * time.Millisecond) // pass 1 has failed a-bad.pdf and is blocked embedding b-good.pdf
+	os.Remove(filepath.Join(dir, "a-bad.pdf"))
+	if s.StartIngest() {
+		t.Fatal("second run started in parallel")
+	} // queues a rerun
+	close(g.release)
+	deadline := time.Now().Add(5 * time.Second)
+	var st struct {
+		Indexing bool
+		Error    string
+	}
+	for time.Now().Before(deadline) {
+		json.Unmarshal(req(h, "GET", "/api/library", "x", nil, "", "").Body.Bytes(), &st)
+		if !st.Indexing {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st.Indexing || st.Error != "" {
+		t.Fatalf("after the clean rerun: indexing=%v error=%q", st.Indexing, st.Error)
+	}
+}
+
+func TestOverwrittenFilesComeBackWhenALaterRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "old.pdf"), []byte("%PDF-1.4 OLD"), 0o644)
+	calls := 0
+	rename = func(a, b string) error {
+		calls++
+		if strings.HasSuffix(b, "new.pdf") && !strings.Contains(b, "replaced") { // the file placed after old.pdf's replacement
+			return errors.New("disk on fire")
+		}
+		return os.Rename(a, b)
+	}
+	defer func() { rename = os.Rename }()
+	// map order is random: retry until old.pdf is replaced before new.pdf fails
+	for i := 0; i < 40; i++ {
+		os.WriteFile(filepath.Join(dir, "old.pdf"), []byte("%PDF-1.4 OLD"), 0o644)
+		err := writeAll(dir, map[string][]byte{"old.pdf": []byte("%PDF-1.4 NEW"), "new.pdf": []byte("%PDF-1.4 N")})
+		if err == nil {
+			t.Fatal("rename failure not reported")
+		}
+		if b, _ := os.ReadFile(filepath.Join(dir, "old.pdf")); string(b) != "%PDF-1.4 OLD" {
+			t.Fatalf("round %d: the replaced file was not restored: %q", i, b)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "new.pdf")); err == nil {
+			t.Fatalf("round %d: a new file of the failed upload was kept", i)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, ".upload-*")); len(left) != 0 {
+			t.Fatalf("temp files left: %v", left)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, "*~")); len(left) != 0 {
+			t.Fatalf("backups left: %v", left)
+		}
+	}
+	rename = os.Rename
+	if err := writeAll(dir, map[string][]byte{"old.pdf": []byte("%PDF-1.4 NEW")}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "old.pdf")); string(b) != "%PDF-1.4 NEW" {
+		t.Fatalf("successful replace: %q", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*~")); len(left) != 0 {
+		t.Fatalf("backup left after success: %v", left)
+	}
+}
+
+func TestStalledUploadReleasesItsSlot(t *testing.T) {
+	old := uploadTimeout
+	uploadTimeout = 300 * time.Millisecond
+	defer func() { uploadTimeout = old }()
+	h, _ := hostServer(t)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	var stalled []net.Conn
+	for i := 0; i < maxUploads; i++ { // two clients open an upload and then send nothing more
+		c, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		fmt.Fprintf(c, "POST /api/upload HTTP/1.1\r\nHost: %s\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 100000\r\n\r\n--B\r\n", strings.TrimPrefix(srv.URL, "http://"))
+		stalled = append(stalled, c)
+	}
+	time.Sleep(100 * time.Millisecond)
+	ct, body := multipartBody([][2]string{{"x.pdf", "%PDF-1.4 x"}})
+	r, _ := http.NewRequest("POST", srv.URL+"/api/upload", strings.NewReader(body))
+	r.Header.Set("Content-Type", ct)
+	if resp, err := http.DefaultClient.Do(r); err != nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("while both slots are held: %v %v", resp, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := http.NewRequest("POST", srv.URL+"/api/upload", strings.NewReader(body))
+		r.Header.Set("Content-Type", ct)
+		if resp, err := http.DefaultClient.Do(r); err == nil && resp.StatusCode == 204 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("stalled clients kept the upload slots after the read deadline")
+}
+
+func TestNoIndexingStartsAfterWait(t *testing.T) {
+	h, s := hostServer(t)
+	_ = h
+	s.Wait()
+	if s.StartIngest() {
+		t.Fatal("indexing started after Wait")
+	}
+	s.wg.Wait() // would hang or race if StartIngest had Added
 }
