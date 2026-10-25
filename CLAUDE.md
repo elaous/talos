@@ -23,6 +23,6 @@ In documentation, plans and PR descriptions, state obligations with RFC 2119 key
 - Each skill MUST cover one workflow, have a specific description stating when it applies, and keep SKILL.md under 500 lines.
 
 ## PRs
-1. After creating a PR, Claude MUST run a fresh, independent review of it.
-2. Claude MUST address all review feedback, leaving no loose ends.
-3. If the PR is clean after that, Claude MUST merge it.
+1. After creating a PR, Claude MUST run a fresh, independent review of it in a new subagent that has none of the authoring context.
+2. Claude MUST address all review feedback, leaving no loose ends: fix each finding, or reply on its thread with the reason it stays as is.
+3. Claude MUST merge the PR once it is clean: no unresolved findings, required CI checks green, and no merge conflict. Claude MUST NOT merge while checks are failing or pending, or when the user says otherwise.
