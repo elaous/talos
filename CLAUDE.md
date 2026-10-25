@@ -21,3 +21,8 @@ In documentation, plans and PR descriptions, state obligations with RFC 2119 key
 - A procedure of 3 or more steps done twice in a project SHOULD become a skill in `.claude/skills/`, or in `~/.claude/skills/` if shared across projects. Claude MUST NOT create skills for one-off tasks, and MAY mention the opportunity at the end of a task.
 - Deterministic steps (formatting, linting, file generation, validation) MUST be a script bundled with the skill.
 - Each skill MUST cover one workflow, have a specific description stating when it applies, and keep SKILL.md under 500 lines.
+
+## PRs
+1. After creating a PR, Claude MUST run a fresh, independent review of it in a new subagent that has none of the authoring context.
+2. Claude MUST address all review feedback, leaving no loose ends: fix each finding, or reply on its thread with the reason it stays as is.
+3. Claude MUST merge the PR once it is clean: no unresolved findings, required CI checks green, and no merge conflict. Claude MUST NOT merge while checks are failing or pending, or when the user says otherwise.
