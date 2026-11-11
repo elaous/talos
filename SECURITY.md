@@ -28,4 +28,4 @@ In scope: the talos server, its web fetching, its PDF handling and its container
 
 Out of scope: the fact that talos has no login (documented in the README: it MUST be put behind an
 authenticating proxy before it is exposed beyond loopback), and vulnerabilities in the model servers
-(Ollama or others) or in the private `gojiberry` module, which SHOULD be reported to their own maintainers.
+(Ollama or others) or in the `gojiberry` module (https://github.com/elaous/gojiberry), which SHOULD be reported to their own maintainers.

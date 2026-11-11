@@ -10,8 +10,8 @@ accepted under the [MIT licence](LICENSE).
 
 ## Development setup
 
-talos needs Go 1.26+ and a sibling checkout of the private `gojiberry` module at `../gojiberry` (see the
-README, "Dependency on gojiberry"). Contributors without access to `gojiberry` cannot build or test talos.
+talos needs Go 1.26+. Its dependency on the public `gojiberry` module is fetched by the Go toolchain, so a fresh
+clone builds with no extra setup (see the README, "Dependency on gojiberry").
 
 ```bash
 make test                       # go vet + go test for all packages, and a WASM vet of ./ui
@@ -38,7 +38,5 @@ anything under `.github/workflows/` changes.
 
 ## Continuous integration
 
-Workflows check out `gojiberry` with the repository secret `GOJIBERRY_READ_TOKEN`. Pull requests from forks
-cannot read that secret, so their workflows are skipped; a maintainer runs `make test` locally before merging them.
-Dependabot pull requests cannot read it either: a maintainer MUST validate dependency updates locally, or MUST add
-`GOJIBERRY_READ_TOKEN` as a Dependabot secret.
+Workflows run on every pull request, including those from forks and from Dependabot; none of them needs a repository
+secret. A pull request that bumps `gojiberry` MUST also commit the regenerated `ui/main.xg.go`.

@@ -17,25 +17,19 @@ browser (xango WASM) ──HTTP──> talos server ──> supervisor ─┬─
 ## Requirements
 
 - Go 1.26 or newer.
-- A sibling checkout of the private `gojiberry` module at `../gojiberry`
-  ([Dependency on gojiberry](#dependency-on-gojiberry)). talos cannot be built without it.
 - A model server: [Ollama](https://ollama.com) or any OpenAI-compatible server. Models are not bundled.
 - Docker 23+ with BuildKit and Compose, only for the container setup.
 
 ## Dependency on gojiberry
 
-talos imports the module `github.com/elaous/gojiberry`, which is **private** and is not published to a Go module
-proxy. `go.mod` therefore contains `replace github.com/elaous/gojiberry => ../gojiberry`, and:
+talos imports the public module [`github.com/elaous/gojiberry`](https://github.com/elaous/gojiberry) as a normal Go
+module, so a fresh clone builds with no sibling checkout. `go.mod` pins it to commit `0595828fe084`
+(`v0.0.0-20261025214457-0595828fe084`).
 
-- You MUST have read access to `gojiberry` and MUST clone it next to this repository, so that the two folders are
-  siblings: `…/talos` and `…/gojiberry`.
-- `make` targets read the location from `GOJIBERRY` (default `../gojiberry`); `docker-compose.yml` reads
-  `GOJIBERRY_DIR`.
-- The Docker build gets it as a named build context, `--build-context gojiberry=../gojiberry` (the Dockerfile
-  copies it to `/src/gojiberry`, where the `replace` expects it). It is only in the build stage: the final image
-  holds the compiled binaries and nothing else from `gojiberry`.
-- Until `gojiberry` is public, a public clone of talos does not build and the public CI cannot pass without the
-  token below.
+- The UI generator is run from the module: `go tool xgc ui` (`make generate`), declared as a `tool` directive in `go.mod`.
+- To bump it, run `go get github.com/elaous/gojiberry@<commit-or-tag>`, then `go mod tidy`, `make test` and
+  `make ui`; commit `go.mod`, `go.sum` and the regenerated `ui/main.xg.go`. Dependabot proposes updates weekly.
+- gojiberry is licensed under AGPL-3.0 (see [Licence](#licence)).
 
 ## Run
 
@@ -52,7 +46,7 @@ PDFs can also be uploaded in the UI. Indexing is incremental (unchanged files ar
 ## Docker
 
 ```bash
-git clone … talos && git clone … gojiberry   # gojiberry (private) next to talos
+git clone https://github.com/elaous/talos.git
 cd talos
 make docker-up                                # builds, then http://127.0.0.1:8080
 ```
@@ -62,8 +56,7 @@ It works on a fresh clone with no setup: the PDF library and the index live in n
 folders on the host instead, `make docker-up-host` (creates `./pdfs` and `./data`, and runs the container as you).
 The image is small (~33 MB, distroless, non-root), runs with a read-only root filesystem and no capabilities, and
 has a health check. If the data folders are not writable, talos says so at start-up instead of at the first upload.
-Without make: `docker build --build-context gojiberry=../gojiberry -t talos:local .` then `docker compose up -d`
-(`GOJIBERRY_DIR=/path/to/gojiberry` if it is not at `../gojiberry`).
+Without make: `docker build -t talos:local .` then `docker compose up -d`.
 
 - **Your data.** The library and the index live in the named volumes `talos_talos-pdfs` and `talos_talos-data`
   (compose project `talos`). `docker compose down` keeps them; **`docker compose down -v` deletes them**, including
@@ -95,7 +88,7 @@ Without make: `docker build --build-context gojiberry=../gojiberry -t talos:loca
   the secret is not stored in the image. The proxy is the usual `HTTPS_PROXY` build argument:
 
   ```bash
-  docker build --build-context gojiberry=../gojiberry \
+  docker build \
     --secret id=cacert,src=/path/to/ca.pem \
     --build-arg HTTPS_PROXY=http://proxy:3128 -t talos:local .
   ```
@@ -130,7 +123,7 @@ scripts/targeted-tests.sh      # only the packages affected by your diff against
 make lint                      # needs a local golangci-lint v2.15.0 (config in .golangci.yml)
 ```
 
-The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be present.
+The LLM is scripted in tests, so no model is needed.
 
 ## Continuous integration
 
@@ -144,12 +137,6 @@ Workflows in `.github/workflows/`:
   requests, pushes to `main` and weekly.
 - `dependabot.yml`: weekly updates for Go modules, Docker and GitHub Actions.
 
-Because `gojiberry` is private, every workflow checks it out as a sibling using the repository secret
-**`GOJIBERRY_READ_TOKEN`**: a token (for example a fine-grained personal access token) with read-only `Contents` access to `elaous/gojiberry`. A maintainer MUST add it under Settings,
-Secrets and variables, Actions. Pull requests from forks cannot read it, so their workflows are skipped.
-Dependabot pull requests cannot read it either, so their workflows are skipped too. A maintainer MUST validate
-dependency updates locally, or MUST add `GOJIBERRY_READ_TOKEN` as a Dependabot secret (Settings, Secrets and
-variables, Dependabot) so the jobs can run.
 Third-party actions are referenced by major version tag, not by commit SHA.
 
 ## Safety notes
@@ -195,8 +182,10 @@ privately as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
-talos is released under the [MIT licence](LICENSE). It links the `gojiberry` module, which has its own licence
-(GNU AGPL-3.0 at the time of writing): check it before distributing a binary or image that includes it.
+talos is released under the [MIT licence](LICENSE). It links the [`gojiberry`](https://github.com/elaous/gojiberry)
+module, which is licensed under the GNU AGPL-3.0. A binary or container image that includes gojiberry (every
+build of talos does) MUST be distributed under the terms of the AGPL-3.0, including offering its corresponding
+source, and the same applies to running a modified build as a network service.
 
 ## Layout
 
