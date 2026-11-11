@@ -127,7 +127,7 @@ Copy `talos.example.json` to `talos.json` (git-ignored) and edit it; pass anothe
 ```bash
 make test                      # go vet + go test for all packages, plus a GOOS=js GOARCH=wasm vet of ./ui
 scripts/targeted-tests.sh      # only the packages affected by your diff against origin/main
-make lint                      # golangci-lint v2 (config in .golangci.yml); install it separately
+make lint                      # needs a local golangci-lint v2.15.0 (config in .golangci.yml)
 ```
 
 The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be present.
@@ -136,7 +136,7 @@ The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be 
 
 Workflows in `.github/workflows/`:
 
-- `pr.yml`: on pull requests, runs `golangci-lint` (`make lint`) and `scripts/targeted-tests.sh`, which vets and tests the packages touched by the
+- `pr.yml`: on pull requests, runs `golangci-lint` v2.15.0 through `golangci-lint-action` (the same checks as `make lint`) and `scripts/targeted-tests.sh`, which vets and tests the packages touched by the
   change plus the packages that import them. It runs the full `make test` instead when `go.mod`, `go.sum`,
   `Makefile`, `Dockerfile` or a workflow file changes.
 - `nightly.yml`: runs the full `make test` every night and on demand.
@@ -145,9 +145,11 @@ Workflows in `.github/workflows/`:
 - `dependabot.yml`: weekly updates for Go modules, Docker and GitHub Actions.
 
 Because `gojiberry` is private, every workflow checks it out as a sibling using the repository secret
-**`GOJIBERRY_READ_TOKEN`**: a token (for example a fine-grained personal access token or a deploy key's
-equivalent) with read-only `Contents` access to `elaous/gojiberry`. A maintainer MUST add it under Settings,
+**`GOJIBERRY_READ_TOKEN`**: a token (for example a fine-grained personal access token) with read-only `Contents` access to `elaous/gojiberry`. A maintainer MUST add it under Settings,
 Secrets and variables, Actions. Pull requests from forks cannot read it, so their workflows are skipped.
+Dependabot pull requests cannot read it either, so their workflows are skipped too. A maintainer MUST validate
+dependency updates locally, or MUST add `GOJIBERRY_READ_TOKEN` as a Dependabot secret (Settings, Secrets and
+variables, Dependabot) so the jobs can run.
 Third-party actions are referenced by major version tag, not by commit SHA.
 
 ## Safety notes

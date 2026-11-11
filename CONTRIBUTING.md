@@ -24,7 +24,7 @@ anything under `.github/workflows/` changes.
 
 ## Pull requests
 
-- A pull request MUST pass `make test` and `make lint` locally (`make lint` needs golangci-lint v2).
+- A pull request MUST pass `make test` and `make lint` locally (`make lint` needs a local golangci-lint v2.15.0, the version CI pins).
 - A pull request SHOULD be small and focused on one change, and MUST describe what changed and how it was tested.
 - Tests SHOULD accompany behaviour changes. Tests MUST NOT need a running model: script the LLM as the existing
   tests do.
@@ -40,3 +40,5 @@ anything under `.github/workflows/` changes.
 
 Workflows check out `gojiberry` with the repository secret `GOJIBERRY_READ_TOKEN`. Pull requests from forks
 cannot read that secret, so their workflows are skipped; a maintainer runs `make test` locally before merging them.
+Dependabot pull requests cannot read it either: a maintainer MUST validate dependency updates locally, or MUST add
+`GOJIBERRY_READ_TOKEN` as a Dependabot secret.
