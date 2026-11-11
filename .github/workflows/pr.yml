@@ -45,3 +45,35 @@ jobs:
         env:
           BASE: origin/${{ github.base_ref }}
         run: scripts/targeted-tests.sh
+
+  lint:
+    name: Lint
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out talos
+        uses: actions/checkout@v4
+        with:
+          path: talos
+          persist-credentials: false
+
+      - name: Check out gojiberry
+        uses: actions/checkout@v4
+        with:
+          repository: elaous/gojiberry
+          path: gojiberry
+          token: ${{ secrets.GOJIBERRY_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: talos/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+          working-directory: talos

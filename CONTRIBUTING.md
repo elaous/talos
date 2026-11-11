@@ -24,7 +24,7 @@ anything under `.github/workflows/` changes.
 
 ## Pull requests
 
-- A pull request MUST pass `make test` locally.
+- A pull request MUST pass `make test` and `make lint` locally (`make lint` needs golangci-lint v2).
 - A pull request SHOULD be small and focused on one change, and MUST describe what changed and how it was tested.
 - Tests SHOULD accompany behaviour changes. Tests MUST NOT need a running model: script the LLM as the existing
   tests do.

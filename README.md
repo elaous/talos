@@ -127,6 +127,7 @@ Copy `talos.example.json` to `talos.json` (git-ignored) and edit it; pass anothe
 ```bash
 make test                      # go vet + go test for all packages, plus a GOOS=js GOARCH=wasm vet of ./ui
 scripts/targeted-tests.sh      # only the packages affected by your diff against origin/main
+make lint                      # golangci-lint v2 (config in .golangci.yml); install it separately
 ```
 
 The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be present.
@@ -135,7 +136,7 @@ The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be 
 
 Workflows in `.github/workflows/`:
 
-- `pr.yml`: on pull requests, runs `scripts/targeted-tests.sh`, which vets and tests the packages touched by the
+- `pr.yml`: on pull requests, runs `golangci-lint` (`make lint`) and `scripts/targeted-tests.sh`, which vets and tests the packages touched by the
   change plus the packages that import them. It runs the full `make test` instead when `go.mod`, `go.sum`,
   `Makefile`, `Dockerfile` or a workflow file changes.
 - `nightly.yml`: runs the full `make test` every night and on demand.

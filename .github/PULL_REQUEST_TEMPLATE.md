@@ -12,7 +12,7 @@
 
 ## Checklist
 
-- [ ] `make test` passes locally
+- [ ] `make test` and `make lint` pass locally
 - [ ] Tests added or updated for behaviour changes
 - [ ] Documentation updated where behaviour or configuration changed
 - [ ] No secrets, personal data or private hostnames in the diff
