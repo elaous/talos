@@ -15,7 +15,7 @@ cd "$(git rev-parse --show-toplevel)"
 if [ "$#" -gt 0 ]; then
   changed=("$@")
 else
-  mapfile -t changed < <(git diff --name-only "${BASE:-origin/main}...HEAD")
+  mapfile -d '' -t changed < <(git diff -z --name-only --no-renames "${BASE:-origin/main}...HEAD")
 fi
 
 if [ "${#changed[@]}" -eq 0 ]; then
@@ -40,7 +40,11 @@ for f in "${changed[@]}"; do
     go.mod | go.sum | Makefile | Dockerfile | scripts/targeted-tests.sh | .github/workflows/* | .github/dependabot.yml)
       full_run "$f changed"
       ;;
-    *.md | LICENSE | .gitignore | .dockerignore | .github/* | docker-compose*.yml | docker/* | talos.example.json)
+    docker-compose*.yml | docker/*)
+      direct+=("$module/cmd/talos")
+      continue
+      ;;
+    *.md | LICENSE | .gitignore | .dockerignore | .github/* | talos.example.json)
       continue
       ;;
   esac
