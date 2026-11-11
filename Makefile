@@ -23,6 +23,10 @@ test:
 	go vet ./... && go test ./...
 	GOOS=js GOARCH=wasm go vet ./ui
 
+.PHONY: lint
+lint:
+	golangci-lint run ./...
+
 .PHONY: run
 run: ui build
 	./bin/talos serve
