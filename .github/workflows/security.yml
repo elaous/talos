@@ -28,7 +28,7 @@ jobs:
       actions: read
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: talos
           persist-credentials: false
@@ -62,7 +62,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: talos
           persist-credentials: false
@@ -91,7 +91,7 @@ jobs:
       actions: read
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: talos
           persist-credentials: false

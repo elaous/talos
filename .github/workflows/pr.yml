@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: talos
           fetch-depth: 0
@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: talos
           persist-credentials: false
@@ -67,7 +67,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out talos
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
