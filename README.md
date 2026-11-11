@@ -27,8 +27,9 @@ module, so a fresh clone builds with no sibling checkout. `go.mod` pins it to co
 (`v0.0.0-20261025214457-0595828fe084`).
 
 - The UI generator is run from the module: `go tool xgc ui` (`make generate`), declared as a `tool` directive in `go.mod`.
-- To bump it, run `go get github.com/elaous/gojiberry@<commit-or-tag>`, then `go mod tidy`, `make test` and
-  `make ui`; commit `go.mod`, `go.sum` and the regenerated `ui/main.xg.go`. Dependabot proposes updates weekly.
+- To bump it, run `go get github.com/elaous/gojiberry@<commit-or-tag>`, then `go mod tidy`, `make generate`
+  and `make test`; commit `go.mod`, `go.sum` and any diff to `ui/main.xg.go`. Run `make ui` only to rebuild the
+  distribution. Dependabot proposes updates weekly.
 - gojiberry is licensed under AGPL-3.0 (see [Licence](#licence)).
 
 ## Run
@@ -182,10 +183,18 @@ privately as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
-talos is released under the [MIT licence](LICENSE). It links the [`gojiberry`](https://github.com/elaous/gojiberry)
-module, which is licensed under the GNU AGPL-3.0. A binary or container image that includes gojiberry (every
-build of talos does) MUST be distributed under the terms of the AGPL-3.0, including offering its corresponding
-source, and the same applies to running a modified build as a network service.
+talos's own source is released under the [MIT licence](LICENSE). It links the
+[`gojiberry`](https://github.com/elaous/gojiberry) module, which is licensed under the GNU AGPL-3.0. This is a
+summary, not legal advice.
+
+- A binary or container image that includes gojiberry (every build of talos does) is a combined work. It MUST be
+  conveyed under the AGPL-3.0, including its Corresponding Source.
+- Running a modified version as a network service MUST offer that source to its users (AGPL-3.0 section 13).
+- gojiberry's NOTICE file and the licence notices MUST be kept. The credit "Made with the Gojiberry project,
+  github.com/elaous/gojiberry" MUST be honoured wherever the work shows its own notices to its users (gojiberry's
+  NOTICE, additional terms under AGPL-3.0 section 7(b)).
+- For use that does not fit the AGPL, see gojiberry's
+  [COMMERCIAL.md](https://github.com/elaous/gojiberry/blob/main/COMMERCIAL.md).
 
 ## Layout
 
