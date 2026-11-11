@@ -1,11 +1,7 @@
-# gojiberry is a named build context; set GOJIBERRY_DIR if not ../gojiberry.
-
 services:
   talos:
     build:
       context: .
-      additional_contexts:
-        gojiberry: ${GOJIBERRY_DIR:-../gojiberry}
     image: talos:local
     # Loopback binding is the only protection: talos has no login.
     ports:
