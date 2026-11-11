@@ -40,3 +40,5 @@ anything under `.github/workflows/` changes.
 
 Workflows run on every pull request, including those from forks and from Dependabot; none of them needs a repository
 secret. A pull request that bumps `gojiberry` MUST also commit the regenerated `ui/main.xg.go`.
+The PR workflow runs `make generate` and fails on any diff, so a maintainer MUST regenerate `ui/main.xg.go` on a
+Dependabot `gojiberry` pull request (`make generate`, then commit the result).
