@@ -1,14 +1,9 @@
 # syntax=docker/dockerfile:1
-#
-# gojiberry is a named build context: see docker-compose.yml.
 
 ARG GO_VERSION=1.26
 
 FROM golang:${GO_VERSION} AS build
 WORKDIR /src
-# go.mod replace needs gojiberry at ../gojiberry.
-COPY --from=gojiberry / /src/gojiberry
-WORKDIR /src/talos
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=secret,id=cacert,required=false \
     if [ -f /run/secrets/cacert ]; then export SSL_CERT_FILE=/run/secrets/cacert; fi; go mod download
@@ -17,7 +12,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     --mount=type=secret,id=cacert,required=false \
     set -eux; \
     if [ -f /run/secrets/cacert ]; then export SSL_CERT_FILE=/run/secrets/cacert; fi; \
-    (cd /src/gojiberry && go run ./cmd/xgc /src/talos/ui); \
+    go tool xgc ui; \
     mkdir -p /out/ui /out/data /out/pdfs; \
     GOOS=js GOARCH=wasm go build -trimpath -o /out/ui/main.wasm ./ui; \
     cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" ui/index.html /out/ui/; \

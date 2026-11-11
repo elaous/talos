@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities MUST NOT be reported here. Use the repository's **Security** tab,
+        **Report a vulnerability**.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it
+      options: [make run, Docker, Other]
+  - type: input
+    id: models
+    attributes:
+      label: Model backend and models
+      description: For example, Ollama with qwen2.5:7b-instruct.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove private document text, hostnames and credentials first.
+      render: shell

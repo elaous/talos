@@ -591,7 +591,6 @@ func TestStalledUploadReleasesItsSlot(t *testing.T) {
 	h, _ := hostServer(t)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
-	var stalled []net.Conn
 	for i := 0; i < maxUploads; i++ { // stalled uploads
 		c, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
 		if err != nil {
@@ -599,7 +598,6 @@ func TestStalledUploadReleasesItsSlot(t *testing.T) {
 		}
 		defer c.Close()
 		fmt.Fprintf(c, "POST /api/upload HTTP/1.1\r\nHost: %s\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: 100000\r\n\r\n--B\r\n", strings.TrimPrefix(srv.URL, "http://"))
-		stalled = append(stalled, c)
 	}
 	time.Sleep(100 * time.Millisecond)
 	ct, body := multipartBody([][2]string{{"x.pdf", "%PDF-1.4 x"}})
