@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/elaous/gojiberry v0.0.0-20261025214457-0595828fe084
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

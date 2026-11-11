@@ -28,6 +28,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache-dependency-path: talos/go.sum
 
       - name: Test changed packages
@@ -51,6 +52,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
           cache-dependency-path: talos/go.sum
 
       - name: Run golangci-lint
@@ -73,6 +75,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          check-latest: true
 
       - name: Regenerate and compare
         run: |
