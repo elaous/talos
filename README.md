@@ -2,7 +2,8 @@
 
 A local multi-agent RAG assistant, written in Go. A **supervisor** agent delegates to specialists — a
 **PDF researcher** (semantic search over your PDF library), a **web researcher** (search + page reading) and a
-**writer** — all running on models you host yourself. The UI is a [gojiberry](../gojiberry) (xango) WASM app.
+**writer** — all running on models you host yourself. The UI is a gojiberry (xango) WASM app (see
+[Dependency on gojiberry](#dependency-on-gojiberry)).
 
 No Python: the model servers speak HTTP, vectors live in a gob file, PDFs are read with gojiberry's `pdftext`.
 
@@ -13,9 +14,30 @@ browser (xango WASM) ──HTTP──> talos server ──> supervisor ─┬─
                                        every agent ──> Ollama  or  any OpenAI-compatible local server
 ```
 
-## Run
+## Requirements
 
-Needs Go 1.26+, a sibling `../gojiberry` checkout (private module, see `go.mod`'s `replace`), and Ollama.
+- Go 1.26 or newer.
+- A sibling checkout of the private `gojiberry` module at `../gojiberry`
+  ([Dependency on gojiberry](#dependency-on-gojiberry)). talos cannot be built without it.
+- A model server: [Ollama](https://ollama.com) or any OpenAI-compatible server. Models are not bundled.
+- Docker 23+ with BuildKit and Compose, only for the container setup.
+
+## Dependency on gojiberry
+
+talos imports the module `github.com/elaous/gojiberry`, which is **private** and is not published to a Go module
+proxy. `go.mod` therefore contains `replace github.com/elaous/gojiberry => ../gojiberry`, and:
+
+- You MUST have read access to `gojiberry` and MUST clone it next to this repository, so that the two folders are
+  siblings: `…/talos` and `…/gojiberry`.
+- `make` targets read the location from `GOJIBERRY` (default `../gojiberry`); `docker-compose.yml` reads
+  `GOJIBERRY_DIR`.
+- The Docker build gets it as a named build context, `--build-context gojiberry=../gojiberry` (the Dockerfile
+  copies it to `/src/gojiberry`, where the `replace` expects it). It is only in the build stage: the final image
+  holds the compiled binaries and nothing else from `gojiberry`.
+- Until `gojiberry` is public, a public clone of talos does not build and the public CI cannot pass without the
+  token below.
+
+## Run
 
 ```bash
 ollama pull qwen2.5:7b-instruct && ollama pull nomic-embed-text
@@ -40,7 +62,8 @@ It works on a fresh clone with no setup: the PDF library and the index live in n
 folders on the host instead, `make docker-up-host` (creates `./pdfs` and `./data`, and runs the container as you).
 The image is small (~33 MB, distroless, non-root), runs with a read-only root filesystem and no capabilities, and
 has a health check. If the data folders are not writable, talos says so at start-up instead of at the first upload.
-Without make: `docker build --build-context gojiberry=../gojiberry -t talos:local .` then `docker compose up -d`.
+Without make: `docker build --build-context gojiberry=../gojiberry -t talos:local .` then `docker compose up -d`
+(`GOJIBERRY_DIR=/path/to/gojiberry` if it is not at `../gojiberry`).
 
 - **Your data.** The library and the index live in the named volumes `talos_talos-pdfs` and `talos_talos-data`
   (compose project `talos`). `docker compose down` keeps them; **`docker compose down -v` deletes them**, including
@@ -66,9 +89,20 @@ Without make: `docker build --build-context gojiberry=../gojiberry -t talos:loca
   unauthenticated agent that can read your library, upload files and fetch URLs, to everyone who can reach the
   machine. Put an authenticating reverse proxy in front before publishing it anywhere else, and add the name
   you use to `TALOS_ALLOWED_HOSTS`.
-- **Behind a TLS-intercepting proxy** (corporate): pass the proxy CA and address at build time only; `make
-  docker-up` builds first, so the flags apply to it as well:
+- **Behind a TLS-intercepting proxy** (corporate): the build downloads Go modules, so it needs your proxy CA and
+  address. Both are build-time only and optional. The CA is passed as the BuildKit secret `cacert` (a PEM file); the
+  Dockerfile points `SSL_CERT_FILE` at it for `go mod download` and the build when the secret is present, and
+  the secret is not stored in the image. The proxy is the usual `HTTPS_PROXY` build argument:
+
+  ```bash
+  docker build --build-context gojiberry=../gojiberry \
+    --secret id=cacert,src=/path/to/ca.pem \
+    --build-arg HTTPS_PROXY=http://proxy:3128 -t talos:local .
+  ```
+
+  With make, `docker-up` builds first, so the same flags apply to it:
   `make docker-up DOCKER_BUILD_FLAGS="--secret id=cacert,src=ca.pem --build-arg HTTPS_PROXY=http://proxy:3128"`.
+  The running container does not use this CA: for web access through a proxy at run time, see "Web access" below.
 - **Pinned versions.** The Go build image is the `golang:1.26` series; the Ollama image in the compose file is
   pinned to a release. Update them deliberately.
 
@@ -83,10 +117,37 @@ Copy `talos.example.json` to `talos.json`. Each agent can use its own model (`ll
 Changing the embedding model or the chunk settings re-indexes the library automatically.
 Use a 7B+ model for the agents: the tool protocol is plain JSON in the reply, which very small models get wrong.
 
+## Configuration
+
+Copy `talos.example.json` to `talos.json` (git-ignored) and edit it; pass another path with `-c`. In the container,
+`docker/talos.json` is used, and the `TALOS_*` variables listed under [Docker](#docker) override the file.
+
 ## Tests
 
-`make test` — all packages (run with `-race` in CI), plus a `GOOS=js GOARCH=wasm` vet of the UI. The LLM is
-scripted in tests, so no model is needed.
+```bash
+make test                      # go vet + go test for all packages, plus a GOOS=js GOARCH=wasm vet of ./ui
+scripts/targeted-tests.sh      # only the packages affected by your diff against origin/main
+```
+
+The LLM is scripted in tests, so no model is needed, but `../gojiberry` MUST be present.
+
+## Continuous integration
+
+Workflows in `.github/workflows/`:
+
+- `pr.yml`: on pull requests, runs `scripts/targeted-tests.sh`, which vets and tests the packages touched by the
+  change plus the packages that import them. It runs the full `make test` instead when `go.mod`, `go.sum`,
+  `Makefile`, `Dockerfile` or a workflow file changes.
+- `nightly.yml`: runs the full `make test` every night and on demand.
+- `security.yml`: CodeQL (Go), `govulncheck` and `gosec` (report-only, uploaded as code scanning alerts) on pull
+  requests, pushes to `main` and weekly.
+- `dependabot.yml`: weekly updates for Go modules, Docker and GitHub Actions.
+
+Because `gojiberry` is private, every workflow checks it out as a sibling using the repository secret
+**`GOJIBERRY_READ_TOKEN`**: a token (for example a fine-grained personal access token or a deploy key's
+equivalent) with read-only `Contents` access to `elaous/gojiberry`. A maintainer MUST add it under Settings,
+Secrets and variables, Actions. Pull requests from forks cannot read it, so their workflows are skipped.
+Third-party actions are referenced by major version tag, not by commit SHA.
 
 ## Safety notes
 
@@ -123,6 +184,16 @@ scripted in tests, so no model is needed.
   an upload failed and putting the old file back failed too, and is the only copy of that file.
 - A PDF with no text layer (a scan) or one that is corrupt is reported and skipped, and not retried until it
   changes; the rest are still indexed. An embedding-server outage is not held against the PDF: it is retried.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md).
+
+## Licence
+
+talos is released under the [MIT licence](LICENSE). It links the `gojiberry` module, which has its own licence
+(GNU AGPL-3.0 at the time of writing): check it before distributing a binary or image that includes it.
 
 ## Layout
 
