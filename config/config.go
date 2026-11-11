@@ -11,9 +11,7 @@ import (
 	"strings"
 )
 
-// Endpoint is one model server. Backend "ollama" speaks Ollama's native API; "openai" speaks the
-// OpenAI-compatible API that llama.cpp (llama-server), vLLM, TGI, LM Studio and others expose, which is how
-// any Hugging Face model runs locally outside Ollama.
+// Endpoint is one model server. Backend is "ollama" or "openai".
 type Endpoint struct {
 	Backend string `json:"backend"`
 	BaseURL string `json:"base_url"`
@@ -23,8 +21,7 @@ type Endpoint struct {
 
 type Config struct {
 	Listen string `json:"listen"`
-	// A non-loopback Listen exposes the library and the agents to the network, with no login. Requests whose
-	// Host header is not the listen host, a loopback name or in AllowedHosts are refused (DNS rebinding).
+	// Non-loopback Listen requires AllowedHosts; there is no login.
 	AllowedHosts []string `json:"allowed_hosts"`
 	DataDir      string   `json:"data_dir"`
 	PDFDir       string   `json:"pdf_dir"`
@@ -43,7 +40,7 @@ type Config struct {
 
 	Web struct {
 		SearxngURL   string `json:"searxng_url"`   // empty: DuckDuckGo
-		Disabled     bool   `json:"disabled"`      // no web researcher: nothing leaves the machine, not even search queries
+		Disabled     bool   `json:"disabled"`      // no web researcher; nothing leaves the machine
 		AllowPrivate bool   `json:"allow_private"` // let fetch_url reach localhost/LAN addresses (and use HTTP(S)_PROXY)
 	} `json:"web"`
 	UIDir string `json:"ui_dir"`
@@ -60,7 +57,7 @@ func Default() Config {
 	return c
 }
 
-// Load reads path over the defaults. A missing file is not an error: the defaults run.
+// Load reads path over defaults; a missing file is not an error.
 func Load(path string) (Config, error) {
 	c := Default()
 	b, err := os.ReadFile(path)
@@ -76,7 +73,6 @@ func Load(path string) (Config, error) {
 	return c, c.Validate()
 }
 
-// LoadEnv is Load followed by the TALOS_* environment overrides (see ApplyEnv).
 func LoadEnv(path string, getenv func(string) string) (Config, error) {
 	c, err := Load(path)
 	if err != nil {
@@ -89,16 +85,7 @@ func LoadEnv(path string, getenv func(string) string) (Config, error) {
 	return c, nil
 }
 
-// ApplyEnv overlays the few settings that differ between machines, so a container needs no edited JSON:
-//
-//	TALOS_LISTEN           listen address, e.g. ":8080"
-//	TALOS_ALLOWED_HOSTS    comma-separated bare Host names (no port), in addition to the loopback ones
-//	TALOS_LLM_BASE_URL     chat model server, e.g. "http://ollama:11434"
-//	TALOS_LLM_MODEL        default chat model
-//	TALOS_EMBED_BASE_URL   embedding model server
-//	TALOS_EMBED_MODEL      embedding model
-//
-// An unset or empty variable changes nothing; a set one overrides the file. LoadEnv validates the result.
+// Unset or empty variables change nothing; set ones override the file.
 func (c *Config) ApplyEnv(getenv func(string) string) {
 	if v := getenv("TALOS_LISTEN"); v != "" {
 		c.Listen = v
@@ -124,7 +111,7 @@ func (c *Config) ApplyEnv(getenv func(string) string) {
 	}
 }
 
-// Validate rejects settings that would misbehave rather than fail clearly.
+// Validate rejects settings that would misbehave.
 func (c Config) Validate() error {
 	if c.ChunkChars < 200 {
 		return fmt.Errorf("chunk_chars must be at least 200, got %d", c.ChunkChars)
@@ -155,7 +142,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// ModelFor is the model an agent runs on: its own entry, else the default.
+// ModelFor returns the agent's model, else the default.
 func (c Config) ModelFor(agent string) string {
 	if m := c.LLM.Models[agent]; m != "" {
 		return m

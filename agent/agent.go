@@ -1,10 +1,4 @@
-// Package agent runs tool-using LLM agents. The tool protocol is plain JSON in the model's reply, so it works
-// with every chat model, with or without native function calling:
-//
-//	{"tool": "<name>", "args": {...}}   call a tool
-//	{"final": "<answer>"}               finish
-//
-// A supervisor treats its specialist agents as tools, which is the whole multi-agent mechanism.
+// Package agent runs tool-using agents; replies are plain JSON.
 package agent
 
 import (
@@ -18,14 +12,13 @@ import (
 	"github.com/elaous/talos/llm"
 )
 
-// Tool is something an agent can call. Args describes the parameters for the prompt.
+// Tool is something an agent can call.
 type Tool struct {
 	Name, Description string
 	Args              map[string]string
 	Run               func(ctx context.Context, args map[string]any) (string, error)
 }
 
-// Event is one step of an agent's work, for the UI's trace.
 type Event struct {
 	Agent string `json:"agent"`
 	Kind  string `json:"kind"` // call, result, final, note
@@ -76,7 +69,7 @@ func (a *Agent) emit(kind, text string) {
 	}
 }
 
-// Run works on task, with optional earlier conversation, and returns the final answer.
+// Run answers task, optionally with earlier history.
 func (a *Agent) Run(ctx context.Context, task string, history []llm.Message) (string, error) {
 	msgs := append([]llm.Message{{Role: "system", Content: a.system()}}, history...)
 	taskIdx := len(msgs) // compact never clips the task itself
@@ -157,7 +150,7 @@ func clip(s string, n int) string {
 	return strings.ToValidUTF8(s[:n], "") + "…"
 }
 
-// ExtractJSON finds the first JSON object in a model reply, tolerating code fences and chatter around it.
+// ExtractJSON returns the first JSON object in a reply.
 func ExtractJSON(s string) (map[string]any, bool) {
 	for start := strings.IndexByte(s, '{'); start >= 0; {
 		dec := json.NewDecoder(strings.NewReader(s[start:]))
@@ -169,7 +162,7 @@ func ExtractJSON(s string) (map[string]any, bool) {
 			if _, ok := m["final"]; ok {
 				return m, true
 			}
-			start += int(dec.InputOffset()) // some other object: skip all of it, including what is nested in it
+			start += int(dec.InputOffset()) // skip the whole non-matching object
 			if next := strings.IndexByte(s[start:], '{'); next >= 0 {
 				start += next
 				continue
@@ -185,19 +178,17 @@ func ExtractJSON(s string) (map[string]any, bool) {
 	return nil, false
 }
 
-// closingTag matches any spelling of a fence-closing tag: any case, spaces, and the fullwidth "<".
+// closingTag matches fence closers with any case, spaces or fullwidth "<".
 var closingTag = regexp.MustCompile(`(?i)[<\x{FF1C}]\s*/\s*tool_?result`)
 
-// shortenCall is the model's own tool call as kept in the conversation: still valid JSON, but with every long
-// string inside it (a whole draft passed to the writer, a nested list of notes) cut, so one big call does not
-// crowd out everything else. The tool name is kept, but bounded.
+// shortenCall keeps a tool call valid JSON while cutting long strings.
 func shortenCall(call map[string]any) string {
 	short := map[string]any{"tool": cutValue(call["tool"], 100)}
 	if args, ok := call["args"]; ok {
 		short["args"] = cutValue(args, 500)
 	}
 	b, _ := json.Marshal(short)
-	if len(b) > 4000 { // many mid-sized values add up: keep the shape of the call, not the contents
+	if len(b) > 4000 { // many mid-sized values add up; keep the shape
 		raw, _ := json.Marshal(short["args"])
 		short["args"] = strings.ToValidUTF8(string(raw[:min(len(raw), 1000)]), "") + "…[cut from history]"
 		b, _ = json.Marshal(short)
@@ -239,12 +230,10 @@ func cutValue(v any, max int) any {
 	return v
 }
 
-// maxContextChars bounds what one agent sends to the model (about 4 characters per token), so the protocol
-// instructions at the start are not pushed out of a small context window.
+// maxContextChars bounds what one agent sends the model.
 const maxContextChars = 48000
 
-// compact shrinks the oldest tool results, then older conversation, until it fits, keeping the system prompt,
-// the task (at taskIdx) and the most recent exchange intact.
+// compact trims old results and history; keeps system prompt and task.
 func compact(msgs []llm.Message, limit, taskIdx int) []llm.Message {
 	size := func() (n int) {
 		for _, m := range msgs {

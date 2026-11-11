@@ -18,7 +18,7 @@ import (
 	"github.com/elaous/gojiberry/export"
 )
 
-// fakeEmb maps text to a bag-of-keywords vector, so nearest-neighbour search is checkable without a model.
+// fakeEmb maps text to keyword-count vectors; no model needed.
 type fakeEmb struct{ calls atomic.Int32 }
 
 var vocab = []string{"revenue", "dolphin", "kernel"}
@@ -90,7 +90,7 @@ func TestIngestSearchPersistAndSkipUnchanged(t *testing.T) {
 	}
 
 	calls := emb.calls.Load()
-	l2, err := Open(idx, emb, "fake", 400, 50) // reload from disk
+	l2, err := Open(idx, emb, "fake", 400, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,14 +148,14 @@ func TestOneBadPDFDoesNotBlockTheOthers(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "a-corrupt.pdf") {
 		t.Fatalf("the bad file is not reported: %v", err)
 	}
-	// a PDF that was indexed and is now gone is still dropped despite the bad file
+	// removed file is dropped even when another file is bad
 	os.Remove(filepath.Join(dir, "b-good.pdf"))
 	if _, err := l.IngestDir(context.Background(), dir); err == nil || len(l.Sources()) != 0 {
 		t.Fatalf("sweep skipped: %v %v", err, l.Sources())
 	}
 }
 
-// slowEmb blocks inside Embed until released, to prove readers are not blocked by an ingest in progress.
+// slowEmb blocks in Embed until released.
 type slowEmb struct{ in, release chan struct{} }
 
 func (s *slowEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -182,7 +182,7 @@ func TestSearchAndSourcesDoNotWaitForIngest(t *testing.T) {
 	l, _ := Open(filepath.Join(t.TempDir(), "i.gob"), emb, "slow", 400, 50)
 	done := make(chan error, 1)
 	go func() { _, err := l.IngestDir(context.Background(), dir); done <- err }()
-	<-emb.in // the ingest is now inside a network call
+	<-emb.in
 	got := make(chan struct{})
 	go func() { l.Sources(); close(got) }()
 	select {
@@ -250,14 +250,13 @@ func TestSearchDoesNotWaitForIngestEither(t *testing.T) {
 	if _, err := l.IngestDir(context.Background(), dir); err != nil {
 		t.Fatal(err)
 	}
-	// a second, slow ingest of a new file is in flight while the first library state is searched
 	writePDF(t, filepath.Join(dir, "b.pdf"), "Dolphin facts.")
 	slow := &slowEmb{in: make(chan struct{}, 1), release: make(chan struct{})}
 	l.emb = slow
 	done := make(chan error, 1)
 	go func() { _, err := l.IngestDir(context.Background(), dir); done <- err }()
 	<-slow.in
-	l.emb = &fakeEmb{} // the query embedder; the in-flight ingest already holds the slow one
+	l.emb = &fakeEmb{} // in-flight ingest keeps the slow embedder
 	got := make(chan []Hit, 1)
 	go func() { h, _ := l.Search(context.Background(), "revenue", 3, ""); got <- h }()
 	select {
@@ -272,7 +271,7 @@ func TestSearchDoesNotWaitForIngestEither(t *testing.T) {
 	<-done
 }
 
-// failEmb fails every call, standing in for a model server that is down.
+// failEmb fails every call.
 type failEmb struct{}
 
 func (failEmb) Embed(context.Context, []string) ([][]float32, error) {
@@ -294,7 +293,7 @@ func TestFailedPDFsAreRememberedOnlyWhenTheFileIsAtFault(t *testing.T) {
 	if _, ok := l.bad["bad.pdf"]; !ok {
 		t.Fatal("a corrupt file was not remembered")
 	}
-	// still reported on the next run (from memory, unchanged), and across a restart
+	// still reported next run, and after restart
 	l2, _ := Open(idx, &fakeEmb{}, "e", 400, 50)
 	if _, ok := l2.bad["bad.pdf"]; !ok {
 		t.Fatal("not persisted")
@@ -302,12 +301,10 @@ func TestFailedPDFsAreRememberedOnlyWhenTheFileIsAtFault(t *testing.T) {
 	if _, err := l2.IngestDir(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "bad.pdf") {
 		t.Fatalf("second run lost the error: %v", err)
 	}
-	// replaced by a valid PDF: indexed, and no longer bad
 	writePDF(t, bad, "Dolphin facts.")
 	if _, err := l2.IngestDir(context.Background(), dir); err != nil || l2.Sources()["bad.pdf"] == 0 || len(l2.bad) != 0 {
 		t.Fatalf("repaired file: %v %v %v", err, l2.Sources(), l2.bad)
 	}
-	// removed: forgotten
 	os.WriteFile(bad, []byte("%PDF-1.4 broken again"), 0o644)
 	l2.IngestDir(context.Background(), dir)
 	os.Remove(bad)
@@ -316,7 +313,7 @@ func TestFailedPDFsAreRememberedOnlyWhenTheFileIsAtFault(t *testing.T) {
 		t.Fatalf("bad entry for a deleted file kept: %v", l2.bad)
 	}
 
-	// a down model server is not the file's fault: nothing is remembered, and the next run retries
+	// model server failures are not remembered
 	dir2 := t.TempDir()
 	writePDF(t, filepath.Join(dir2, "ok.pdf"), "Revenue grew.")
 	l3, _ := Open(filepath.Join(t.TempDir(), "i.gob"), failEmb{}, "e", 400, 50)
@@ -381,7 +378,7 @@ func TestSearchDuringSaveAndIngestIsRaceFree(t *testing.T) {
 	wg.Wait()
 }
 
-// gateAfter embeds the first n calls at once and blocks later ones until the context ends.
+// gateAfter blocks calls after the first n until ctx ends.
 type gateAfter struct {
 	n     int
 	calls atomic.Int32
@@ -407,12 +404,12 @@ func TestLongIngestSavesProgressWhileRunning(t *testing.T) {
 	idx := filepath.Join(t.TempDir(), "i.gob")
 	emb := &gateAfter{n: 2}
 	l, _ := Open(idx, emb, "e", 400, 50)
-	l.saveEvery = time.Nanosecond // save after every finished file
+	l.saveEvery = time.Nanosecond // save after every file
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
 	go func() { l.IngestDir(ctx, dir); close(done) }()
-	// c.pdf is blocked in Embed: the run is still going, yet a and b must already be on disk
+	// a and b are saved while c.pdf blocks
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if again, err := Open(idx, emb, "e", 400, 50); err == nil && len(again.Sources()) == 2 {
@@ -440,7 +437,7 @@ func TestSlowPDFReadIsNotRememberedAsBad(t *testing.T) {
 	if len(l.bad) != 0 {
 		t.Fatalf("a timeout was remembered as permanent: %v", l.bad)
 	}
-	extractPages = real // the machine is quiet again: the same, unchanged file is retried and indexed
+	extractPages = real // unchanged file is retried
 	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["big.pdf"] == 0 {
 		t.Fatalf("not retried: %v %v", err, l.Sources())
 	}

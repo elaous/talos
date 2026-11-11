@@ -239,7 +239,6 @@ func TestUpload(t *testing.T) {
 		t.Fatalf("backslash traversal: %d", w.Code)
 	}
 
-	// a bad second part saves nothing, not even the good first part
 	if w := post([][2]string{{"good.pdf", "%PDF-1.4 c"}, {"fake.pdf", "<html>not a pdf"}}); w.Code != 400 {
 		t.Fatalf("non-PDF part: %d", w.Code)
 	}
@@ -253,7 +252,6 @@ func TestUpload(t *testing.T) {
 		t.Fatalf("empty upload: %d", w.Code)
 	}
 
-	// a same-named upload replaces the file (updating a document), atomically and with no temp files left
 	post([][2]string{{"doc.pdf", "%PDF-1.4 one"}})
 	post([][2]string{{"doc.pdf", "%PDF-1.4 two"}})
 	if read("doc.pdf") != "%PDF-1.4 two" {
@@ -277,7 +275,7 @@ func TestIngestRequestedWhileRunningRunsAgain(t *testing.T) {
 	if !s.StartIngest() {
 		t.Fatal("first run refused")
 	}
-	<-emb.entered // inside the first run's embedding call
+	<-emb.entered
 	writeTestPDF(t, filepath.Join(dir, "b.pdf"), "beta text")
 	if s.StartIngest() {
 		t.Fatal("a second run started while one was going")
@@ -337,12 +335,12 @@ func TestUploadIsAllOrNothing(t *testing.T) {
 	if w := post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"bad\x01name.pdf", "%PDF-1.4 b"}}); w.Code != 400 || exists("ok.pdf") {
 		t.Fatalf("control character in name: %d", w.Code)
 	}
-	// a name that is already a directory cannot be written: nothing of the upload may remain
+	// directory-named file: upload leaves nothing behind
 	os.Mkdir(filepath.Join(s.PDFDir, "dir.pdf"), 0o755)
 	if w := post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"dir.pdf", "%PDF-1.4 b"}}); w.Code != 500 {
 		t.Fatalf("unwritable name: %d", w.Code)
 	}
-	for i := 0; i < 20; i++ { // map order is random, so repeat: ok.pdf must never survive
+	for i := 0; i < 20; i++ { // map order is random: repeat the run
 		post([][2]string{{"ok.pdf", "%PDF-1.4 a"}, {"dir.pdf", "%PDF-1.4 b"}})
 	}
 	if exists("ok.pdf") {
@@ -361,7 +359,6 @@ func TestOversizeUploadIs413(t *testing.T) {
 	}
 }
 
-// recorder keeps what the model was sent.
 type recorder struct {
 	mu  sync.Mutex
 	got [][]llm.Message
@@ -409,12 +406,12 @@ func TestHistoryIsCappedByCharacters(t *testing.T) {
 	for _, m := range sent {
 		n += len(m.Content)
 	}
-	if n > maxHistChars+8<<10 { // history budget plus the system prompt and question
+	if n > maxHistChars+8<<10 { // history budget plus overhead
 		t.Fatalf("%d characters sent", n)
 	}
 }
 
-// gateEmb embeds the first file at once and blocks on the next until the context ends.
+// gateEmb blocks calls after the first file until ctx ends.
 type gateEmb struct{ calls int }
 
 func (g *gateEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -442,10 +439,10 @@ func TestShutdownKeepsWhatIndexingFinished(t *testing.T) {
 	s.Handler()
 	s.StartIngest()
 	deadline := time.Now().Add(5 * time.Second)
-	for len(lib.Sources()) == 0 && time.Now().Before(deadline) { // a.pdf done, b.pdf blocked in Embed
+	for len(lib.Sources()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	cancel() // SIGTERM
+	cancel() // simulates SIGTERM
 	done := make(chan struct{})
 	go func() { s.Wait(); close(done) }()
 	select {
@@ -492,7 +489,7 @@ func TestStaleIndexErrorIsClearedByTheNextRun(t *testing.T) {
 	}
 }
 
-// gateFirstEmb blocks every call until released, so a pass can be held open.
+// gateFirstEmb blocks every call until released.
 type gateFirstEmb struct{ release chan struct{} }
 
 func (g gateFirstEmb) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -508,8 +505,7 @@ func (g gateFirstEmb) Embed(ctx context.Context, texts []string) ([][]float32, e
 	return out, nil
 }
 
-// The error of a pass must not outlive a rerun that no longer has it: pass 1 fails on bad.pdf while good.pdf
-// is still embedding; bad.pdf is deleted and a rerun is queued; pass 2 is clean.
+// A rerun must clear the error of an earlier pass.
 func TestRerunClearsTheErrorOfThePassBefore(t *testing.T) {
 	var cfg config.Config
 	dir := t.TempDir()
@@ -521,11 +517,11 @@ func TestRerunClearsTheErrorOfThePassBefore(t *testing.T) {
 		UI: fstest.MapFS{"index.html": {Data: []byte("x")}}}
 	h := s.Handler()
 	s.StartIngest()
-	time.Sleep(100 * time.Millisecond) // pass 1 has failed a-bad.pdf and is blocked embedding b-good.pdf
+	time.Sleep(100 * time.Millisecond)
 	os.Remove(filepath.Join(dir, "a-bad.pdf"))
 	if s.StartIngest() {
 		t.Fatal("second run started in parallel")
-	} // queues a rerun
+	}
 	close(g.release)
 	deadline := time.Now().Add(5 * time.Second)
 	var st struct {
@@ -550,13 +546,13 @@ func TestOverwrittenFilesComeBackWhenALaterRenameFails(t *testing.T) {
 	calls := 0
 	rename = func(a, b string) error {
 		calls++
-		if strings.HasSuffix(b, "new.pdf") && !strings.Contains(b, "replaced") { // the file placed after old.pdf's replacement
+		if strings.HasSuffix(b, "new.pdf") && !strings.Contains(b, "replaced") {
 			return errors.New("disk on fire")
 		}
 		return os.Rename(a, b)
 	}
 	defer func() { rename = os.Rename }()
-	// map order is random: retry until old.pdf is replaced before new.pdf fails
+	// map order is random: retry until the order holds
 	for i := 0; i < 40; i++ {
 		os.WriteFile(filepath.Join(dir, "old.pdf"), []byte("%PDF-1.4 OLD"), 0o644)
 		err := writeAll(dir, map[string][]byte{"old.pdf": []byte("%PDF-1.4 NEW"), "new.pdf": []byte("%PDF-1.4 N")})
@@ -596,7 +592,7 @@ func TestStalledUploadReleasesItsSlot(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	var stalled []net.Conn
-	for i := 0; i < maxUploads; i++ { // two clients open an upload and then send nothing more
+	for i := 0; i < maxUploads; i++ { // stalled uploads
 		c, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
 		if err != nil {
 			t.Fatal(err)
@@ -631,17 +627,17 @@ func TestNoIndexingStartsAfterWait(t *testing.T) {
 	if s.StartIngest() {
 		t.Fatal("indexing started after Wait")
 	}
-	s.wg.Wait() // would hang or race if StartIngest had Added
+	s.wg.Wait() // races if Add follows Wait
 }
 
-// While an upload replaces a file, the old file must exist at every moment a crash could happen.
+// The old file must exist at every crash point.
 func TestReplacingAFileNeverLeavesItMissing(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, "doc.pdf")
 	os.WriteFile(old, []byte("%PDF-1.4 OLD"), 0o644)
 	var inFlight []string
 	rename = func(a, b string) error {
-		if b == old { // the moment the new file takes over
+		if b == old {
 			got, err := os.ReadFile(old)
 			inFlight = append(inFlight, fmt.Sprintf("%q %v", got, err))
 			if err != nil || string(got) != "%PDF-1.4 OLD" {
@@ -707,8 +703,7 @@ func TestConcurrentUploadsOfOneNameEndInAConsistentState(t *testing.T) {
 	}
 }
 
-// Two uploads must not be inside writeAll at the same time: they would share backup names. The rename hook
-// holds each writer long enough for an unserialized second one to arrive, and records the overlap.
+// Uploads must not run writeAll concurrently: backup names would collide.
 func TestUploadsAreSerializedIntoTheLibrary(t *testing.T) {
 	h, s := hostServer(t)
 	var active, peak atomic.Int32
@@ -743,7 +738,7 @@ func TestUploadsAreSerializedIntoTheLibrary(t *testing.T) {
 	}
 }
 
-// If the restore of an overwritten file itself fails, its backup is the only copy of the old content: keep it.
+// Failed restore keeps the backup as the only copy.
 func TestFailedRestoreKeepsTheBackup(t *testing.T) {
 	dir := t.TempDir()
 	a, b := filepath.Join(dir, "a.pdf"), filepath.Join(dir, "b.pdf")
@@ -757,8 +752,7 @@ func TestFailedRestoreKeepsTheBackup(t *testing.T) {
 			first = to
 			return os.Rename(from, to)
 		}
-		// the second replacement fails, and the first destination has meanwhile become a non-empty directory,
-		// so putting the first file's backup back cannot work
+		// restore is impossible: destination became a non-empty directory.
 		os.Remove(first)
 		os.Mkdir(first, 0o755)
 		os.WriteFile(filepath.Join(first, "x"), []byte("x"), 0o644)
@@ -773,7 +767,7 @@ func TestFailedRestoreKeepsTheBackup(t *testing.T) {
 	if err != nil || string(got) != want {
 		t.Fatalf("the only copy of the old %s was lost: %q %v", filepath.Base(first), got, err)
 	}
-	// and the startup sweep does not delete it
+	// startup sweep must not delete it
 	removeStaleBackups(dir)
 	if got, err := os.ReadFile(first + keptSuffix); err != nil || string(got) != want {
 		t.Fatalf("the sweep deleted the kept copy: %q %v", got, err)
@@ -819,8 +813,7 @@ func TestStartupSweepIsExactEvenForOddFolderNames(t *testing.T) {
 	}
 }
 
-// failRestoreOnce replaces a.pdf and b.pdf, fails the second rename and sabotages the first-placed file so its
-// restore fails too, leaving that file's old copy as the only one.
+// failRestoreOnce makes the first file's restore fail too.
 func failRestoreOnce(t *testing.T, dir, oldContent string) string {
 	t.Helper()
 	os.RemoveAll(filepath.Join(dir, "a.pdf"))
@@ -849,7 +842,7 @@ func failRestoreOnce(t *testing.T, dir, oldContent string) string {
 
 func TestASecondFailedRestoreDoesNotOverwriteAnEarlierKeptCopy(t *testing.T) {
 	dir := t.TempDir()
-	const rounds = 12 // only two file names exist, so earlier rounds' kept copies are certain to collide by name
+	const rounds = 12 // two names: kept copies collide
 	for i := 0; i < rounds; i++ {
 		failRestoreOnce(t, dir, fmt.Sprintf("%%PDF-1.4 OLD-%02d", i))
 	}
@@ -912,7 +905,7 @@ func TestUploadsAreRefusedClearlyWhenThePDFFolderIsReadOnly(t *testing.T) {
 	}
 }
 
-// An IPv6 entry is matched by the bracket-free name the Host header carries.
+// IPv6 entries match bracket-free Host names.
 func TestIPv6AllowedHostMatchesBracketedHostHeader(t *testing.T) {
 	h, _ := hostServer(t, "fd00::5", "Talos.LAN")
 	for host, want := range map[string]int{"[fd00::5]:8080": 200, "[FD00::5]": 200, "talos.lan:8080": 200, "[fd00::6]:8080": 403, "evil.test": 403} {

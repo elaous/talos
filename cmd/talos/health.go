@@ -12,8 +12,7 @@ import (
 	"syscall"
 )
 
-// healthURL is where the server's own front page can be fetched from inside the same container or host: the
-// listen address, with a wildcard host (":8080", "0.0.0.0", "::") replaced by loopback.
+// healthURL maps a listen address to loopback, replacing wildcard hosts.
 func healthURL(listen string) (string, error) {
 	h, p, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -26,7 +25,6 @@ func healthURL(listen string) (string, error) {
 	return "http://" + net.JoinHostPort(h, p) + "/", nil
 }
 
-// checkHealth fetches url and wants a 200.
 func checkHealth(ctx context.Context, url string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -43,10 +41,7 @@ func checkHealth(ctx context.Context, url string) error {
 	return nil
 }
 
-// checkWritable makes sure each folder exists and this process can write in it, and says what to do when it
-// cannot. In a container the usual causes are a bind-mounted folder that belongs to another user, a named volume
-// left over from a run as another user, and no mount at all under a read-only root filesystem; without this
-// they would show up only as "permission denied" at the first upload or ingest, with a green health check.
+// checkWritable fails early on unwritable folders, with a remedy.
 func checkWritable(dirs ...string) error {
 	for _, d := range dirs {
 		if err := probeWritable(d); err != nil {
@@ -56,7 +51,7 @@ func checkWritable(dirs ...string) error {
 	return nil
 }
 
-// createTemp is os.CreateTemp; tests replace it, since a test run as root can write anywhere.
+// Replaced in tests: root can write anywhere.
 var createTemp = os.CreateTemp
 
 func probeWritable(d string) error {

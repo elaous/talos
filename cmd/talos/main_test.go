@@ -73,8 +73,8 @@ func TestCheckHealth(t *testing.T) {
 	}
 }
 
-// The config baked into the image must stay loadable and servable: a wildcard listen needs allowed_hosts, and the
-// paths must be the ones the Dockerfile creates.
+// Image config must load and serve; wildcard listen needs allowed_hosts.
+// Paths must match those the Dockerfile creates.
 func TestDockerConfigIsValid(t *testing.T) {
 	cfg, err := config.Load("../../docker/talos.json")
 	if err != nil {
@@ -107,7 +107,7 @@ func TestCheckWritable(t *testing.T) {
 	if err := checkWritable(filepath.Join(file, "sub")); err == nil {
 		t.Fatal("a folder under a regular file was accepted")
 	}
-	// a folder this process may not write to (simulated: a test run as root can write anywhere)
+	// a folder this process may not write to (simulated)
 	createTemp = func(string, string) (*os.File, error) { return nil, os.ErrPermission }
 	defer func() { createTemp = os.CreateTemp }()
 	err := checkWritable(dir)
@@ -149,7 +149,7 @@ func writeCfg(t *testing.T, data, pdfs string) string {
 	return p
 }
 
-// run() itself must perform the start-up check: the function alone being right protects nobody.
+// run() must perform the start-up check itself.
 func TestStartUpChecksAreWired(t *testing.T) {
 	defer func() { createTemp = os.CreateTemp }()
 	data, pdfs := t.TempDir(), t.TempDir()
@@ -168,12 +168,12 @@ func TestStartUpChecksAreWired(t *testing.T) {
 			t.Errorf("%s with an unwritable data folder: %v", cmd, err)
 		}
 	}
-	// "ask" does not write anywhere: it must not be stopped by it
+	// ask writes nothing: the check must not stop it
 	only(data)
 	if err := run(cfg, []string{"ask"}); err == nil || strings.Contains(err.Error(), "not writable") {
 		t.Errorf("ask was stopped by the writability check: %v", err)
 	}
-	// an unwritable PDF folder is a warning: serve gets past the check (and then stops at the missing UI)
+	// unwritable PDF folder only warns; serve continues
 	only(pdfs)
 	err := run(cfg, []string{"serve"})
 	if err == nil || strings.Contains(err.Error(), "not writable") || !strings.Contains(err.Error(), "UI is not built") {

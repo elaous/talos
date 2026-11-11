@@ -1,12 +1,4 @@
-// Command talos is a local multi-agent RAG assistant: a supervisor and specialist agents over your PDF
-// library and the web, running on models you host (Ollama, or any OpenAI-compatible local server).
-//
-//	talos [-c talos.json] serve            web UI + API (default)
-//	talos [-c talos.json] ingest           index the PDFs
-//	talos [-c talos.json] ask "question"   one-shot, steps on stderr
-//	talos [-c talos.json] healthcheck      exit 0 if the server answers (for container health checks)
-//
-// TALOS_* environment variables override a few settings; see config.Config.ApplyEnv.
+// Command talos runs the server, indexer, one-shot ask or healthcheck.
 package main
 
 import (
@@ -46,7 +38,7 @@ func run(cfgPath string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", cfgPath, err)
 	}
-	if len(args) > 0 && args[0] == "healthcheck" { // light: no model clients, no index
+	if len(args) > 0 && args[0] == "healthcheck" { // no model clients or index
 		u, err := healthURL(cfg.Listen)
 		if err != nil {
 			return err
@@ -59,12 +51,12 @@ func run(cfgPath string, args []string) error {
 	if len(args) > 0 {
 		cmd = args[0]
 	}
-	switch cmd { // fail at the start, with a clear message, rather than at the first upload or ingest
+	switch cmd { // fail at start-up, not at first upload
 	case "serve":
 		if err := checkWritable(cfg.DataDir); err != nil { // the index must be written
 			return err
 		}
-		// A PDF folder mounted read-only still serves searches: only uploads need to write there.
+		// Read-only PDF folder still serves searches.
 		if err := checkWritable(cfg.PDFDir); err != nil {
 			log.Printf("warning: uploads will not work: %v", err)
 		}
@@ -134,19 +126,18 @@ func run(cfgPath string, args []string) error {
 			return err
 		}
 		<-shutdown
-		s.Wait() // an ingest in progress saves what it finished before the process exits
+		s.Wait() // in-progress ingest saves finished files on exit
 		return nil
 	}
 	return fmt.Errorf("unknown command %q (serve, ingest, ask, healthcheck)", cmd)
 }
 
-// allowedHosts is the set of Host names the server answers to: the listen host, loopback and any configured
-// names. A wildcard listen address (0.0.0.0, ::, or just a port) needs allowed_hosts: without a list the Host
-// check would be off, and with no login that is what makes DNS rebinding work.
+// allowedHosts lists Host names the server answers to, besides loopback.
+// Wildcard listen needs allowed_hosts: without it, DNS rebinding works.
 func allowedHosts(cfg config.Config) ([]string, error) {
 	var hosts []string
 	for _, h := range cfg.AllowedHosts {
-		hosts = append(hosts, strings.Trim(h, "[]")) // the server compares against the Host header's bracket-free name
+		hosts = append(hosts, strings.Trim(h, "[]")) // Host names are compared without brackets
 	}
 	h, _, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
