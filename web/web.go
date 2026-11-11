@@ -1,4 +1,4 @@
-// Package web is the agents' window on the internet: search and page fetch.
+// Package web provides search and page fetching.
 package web
 
 import (
@@ -26,36 +26,35 @@ type Result struct{ Title, URL, Snippet string }
 type Client struct {
 	SearxngURL string
 	http       *http.Client // pages: refuses private addresses unless allowed
-	searx      *http.Client // the operator's own SearXNG, which may well be on localhost
+	searx      *http.Client // operator's SearXNG, may be on localhost
 }
 
-// Address ranges that are not the public internet and that dial checks tend to forget.
+// Non-public ranges that dial checks often miss.
 var blockedNets = func() []netip.Prefix {
 	var ps []netip.Prefix
 	for _, s := range []string{
-		"0.0.0.0/8",        // "this network": 0.1.2.3 is not a public host
-		"168.63.129.16/32", // Azure WireServer, a metadata-like service on a public-looking address
-		"100.64.0.0/10",    // carrier-grade NAT: Tailscale, and Alibaba's metadata service 100.100.100.200
-		"198.18.0.0/15",    // benchmarking
-		"192.0.0.0/24",     // IETF protocol assignments
-		"240.0.0.0/4",      // reserved, including 255.255.255.255
-		"64:ff9b:1::/48",   // local-use NAT64
-		"fd00:ec2::/32",    // AWS IPv6 metadata
-		"fe80::/10",        // link-local
-		"fec0::/10",        // deprecated site-local
-		"2001:db8::/32",    // documentation
-		"2001::/32",        // Teredo
-		"::ffff:0:0/96",    // IPv4-mapped (also unmapped by the caller)
+		"0.0.0.0/8",
+		"168.63.129.16/32",
+		"100.64.0.0/10",
+		"198.18.0.0/15",
+		"192.0.0.0/24",
+		"240.0.0.0/4",
+		"64:ff9b:1::/48",
+		"fd00:ec2::/32",
+		"fe80::/10",
+		"fec0::/10",
+		"2001:db8::/32",
+		"2001::/32",
+		"::ffff:0:0/96",
 	} {
 		ps = append(ps, netip.MustParsePrefix(s))
 	}
 	return ps
 }()
 
-// BlockedIP reports whether fetching ip would reach a loopback, LAN, link-local, metadata or otherwise
-// non-public address, including IPv4 addresses embedded in NAT64 and 6to4 IPv6 addresses.
+// BlockedIP reports non-public addresses, unwrapping NAT64 and 6to4.
 func BlockedIP(ip netip.Addr) bool {
-	ip = ip.Unmap().WithZone("") // a zone ("%eth0") would make every prefix test below false
+	ip = ip.Unmap().WithZone("") // a zone suffix would defeat the prefix tests below
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsUnspecified() || ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
 		return true
@@ -77,18 +76,8 @@ func BlockedIP(ip netip.Addr) bool {
 	return false
 }
 
-// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses. How depends on whether
-// the request is proxied (HTTP(S)_PROXY and NO_PROXY decide that, per request, so every redirect is judged again):
-//
-//   - Direct requests use a transport whose dialler checks the address it actually connects to. There are no
-//     exemptions, so redirects, DNS tricks and odd spellings of a host cannot get around it, and a proxy's own
-//     address is just another private address.
-//   - Proxied requests use a transport that is fixed to the proxy and can dial nothing else, so it needs no
-//     exemption either. The target is validated first by validateProxiedTarget, which is best-effort: the
-//     proxy resolves the name again, and a hostile DNS server can answer the two lookups differently, so with
-//     a proxy what the LAN exposes depends on the proxy.
-//
-// A model that was fed a hostile page must not be able to reach services on this machine or its network.
+// New builds a client; allowPrivate lifts the page fetch check.
+// Proxied hosts are checked best-effort: the proxy resolves DNS again.
 func New(searxngURL string, allowPrivate bool) *Client {
 	plain := &net.Dialer{Timeout: 10 * time.Second}
 	pf := httpproxy.FromEnvironment().ProxyFunc()
@@ -103,12 +92,12 @@ func New(searxngURL string, allowPrivate bool) *Client {
 		searx: &http.Client{Timeout: 25 * time.Second, Transport: &http.Transport{DialContext: plain.DialContext, Proxy: func(r *http.Request) (*url.URL, error) { return pf(r.URL) }, IdleConnTimeout: 60 * time.Second, MaxIdleConns: 20, MaxIdleConnsPerHost: 2}}}
 }
 
-// pageTransport sends each request either directly (checked dialler) or through the proxy (validated target).
+// pageTransport dials directly (checked) or via a validated proxy.
 type pageTransport struct {
 	pf      func(*url.URL) (*url.URL, error)
 	direct  *http.Transport
 	mu      sync.Mutex
-	proxied map[string]*http.Transport // by proxy URL; each can only ever dial its proxy, built on first use
+	proxied map[string]*http.Transport // per proxy URL; dials only that proxy
 	plain   *net.Dialer
 }
 
@@ -131,7 +120,7 @@ func newPageTransport(pf func(*url.URL) (*url.URL, error)) *pageTransport {
 		proxied: map[string]*http.Transport{}, plain: &net.Dialer{Timeout: 10 * time.Second}}
 }
 
-// proxyTransport is the transport for one proxy URL, made the first time that proxy is needed.
+// proxyTransport returns the lazily built transport for pu.
 func (t *pageTransport) proxyTransport(pu *url.URL) *http.Transport {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -147,15 +136,13 @@ func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pu == nil { // no proxy for this request (none configured, NO_PROXY, loopback): checked dial
+	if pu == nil { // no proxy for this request: checked direct dial
 		return t.direct.RoundTrip(r)
 	}
 	if err := validateProxiedTarget(r.Context(), r.URL.Hostname()); err != nil {
 		return nil, err
 	}
-	// Send the proxy the very name that was validated. net/http spells a host differently for http and https
-	// (https maps it with IDNA, http only punycodes it), so without this a name could be checked as one thing and
-	// asked of the proxy as another.
+	// Send the validated name: http and https spell hosts differently.
 	h, _ := normalizeHost(r.URL.Hostname()) // validateProxiedTarget has accepted it
 	r2 := r.Clone(r.Context())
 	r2.URL.Host = hostWithPort(h, r.URL.Port())
@@ -163,7 +150,6 @@ func (t *pageTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.proxyTransport(pu).RoundTrip(r2)
 }
 
-// hostWithPort is host[:port], with an IPv6 literal in brackets.
 func hostWithPort(host, port string) string {
 	if port != "" {
 		return net.JoinHostPort(host, port)
@@ -174,10 +160,7 @@ func hostWithPort(host, port string) string {
 	return host
 }
 
-// normalizeHost spells a host the way net/http does when it sends it on (a pure ASCII host as it is, anything
-// else through IDNA's lookup mapping, which also turns the ideographic and fullwidth full stops into "."), then
-// lower-cases it and drops every trailing dot. What is validated is what the proxy receives: "１２７.0.0.1",
-// "localhost。" and "LOCALHOST.." are not new names.
+// Normalize as net/http sends it: IDNA, lower-case, no trailing dots.
 func normalizeHost(h string) (string, error) {
 	ascii := true
 	for i := 0; i < len(h); i++ {
@@ -196,8 +179,7 @@ func normalizeHost(h string) (string, error) {
 	return strings.TrimRight(strings.ToLower(h), "."), nil
 }
 
-// parseLegacyIPv4 reads the forms a C library accepts (inet_aton): 1 to 4 parts, each decimal, 0octal or 0xhex,
-// the last part filling the remaining bytes: "2130706433", "0x7f.1", "127.1", "0177.0.0.1".
+// Accepts inet_aton forms such as "127.1" and "0x7f.1".
 func parseLegacyIPv4(s string) (netip.Addr, bool) {
 	parts := strings.Split(s, ".")
 	if len(parts) > 4 {
@@ -238,8 +220,7 @@ func parseLegacyIPv4(s string) (netip.Addr, bool) {
 	return netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}), true
 }
 
-// numericLabels reports whether every label looks like a number (decimal or 0x hex): such a name is an address in
-// some spelling, never a DNS name.
+// All labels numeric: an address spelling, not DNS.
 func numericLabels(h string) bool {
 	for _, p := range strings.Split(h, ".") {
 		if p == "" {
@@ -249,7 +230,7 @@ func numericLabels(h string) bool {
 		if strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X") {
 			d = p[2:]
 			if d == "" {
-				continue // "0x" alone is a number; a host is numeric only if every label is ("0x.org" is a site)
+				continue // "0x" alone is numeric; "0x.org" is not an address
 			}
 			for _, c := range d {
 				if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
@@ -267,9 +248,7 @@ func numericLabels(h string) bool {
 	return true
 }
 
-// validateProxiedTarget is what a proxied request's host must pass before the proxy is asked to connect to it:
-// not localhost, not an address in any spelling that is non-public, and not a name that resolves here to one.
-// A name this machine cannot resolve passes (the proxy may have DNS we do not), which is why it is best-effort.
+// Refuses localhost and non-public addresses; unresolvable names pass.
 func validateProxiedTarget(ctx context.Context, host string) error {
 	h, err := normalizeHost(host)
 	if err != nil {
@@ -294,7 +273,7 @@ func validateProxiedTarget(ctx context.Context, host string) error {
 		}
 		return nil
 	}
-	if strings.Contains(h, ":") { // a colon is never in a DNS name: an IPv6 literal we could not parse
+	if strings.Contains(h, ":") { // a colon never appears in a DNS name
 		return refuse("not a valid address")
 	}
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", h)
@@ -309,7 +288,7 @@ func validateProxiedTarget(ctx context.Context, host string) error {
 	return nil
 }
 
-// boundIdle keeps a long-running server from holding a connection per host it ever fetched from.
+// Caps idle connections in total and per host.
 func boundIdle(t *http.Transport) *http.Transport {
 	t.IdleConnTimeout = 60 * time.Second
 	t.MaxIdleConns = 20
@@ -334,7 +313,6 @@ func (c *Client) get(ctx context.Context, hc *http.Client, u string) ([]byte, er
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 }
 
-// Search uses SearXNG when configured and DuckDuckGo's HTML endpoint otherwise.
 func (c *Client) Search(ctx context.Context, q string, n int) ([]Result, error) {
 	if n <= 0 {
 		n = 5
@@ -422,7 +400,7 @@ func parseDDG(b []byte) []Result {
 	return rs
 }
 
-// ddgTarget unwraps DuckDuckGo's //duckduckgo.com/l/?uddg=<url> redirect links.
+// Unwraps DuckDuckGo's uddg redirect links.
 func ddgTarget(h string) string {
 	if strings.HasPrefix(h, "//") {
 		h = "https:" + h
@@ -435,7 +413,6 @@ func ddgTarget(h string) string {
 	return h
 }
 
-// Fetch returns a page's readable text, cut to maxChars.
 func (c *Client) Fetch(ctx context.Context, raw string, maxChars int) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -448,7 +425,7 @@ func (c *Client) Fetch(ctx context.Context, raw string, maxChars int) (string, e
 	return Readable(b, maxChars), nil
 }
 
-// Readable extracts the visible text of an HTML page, skipping scripts, styles and page furniture.
+// Extracts visible text, skipping scripts, styles and page furniture.
 func Readable(b []byte, maxChars int) string {
 	doc, err := html.Parse(strings.NewReader(string(b)))
 	if err != nil {

@@ -13,7 +13,7 @@ import (
 	"github.com/elaous/talos/web"
 )
 
-// maxTaskChars bounds what one agent hands another: about a third of the context an agent may use.
+// maxTaskChars bounds the task one agent hands another.
 const maxTaskChars = 16000
 
 func str(args map[string]any, k string) string {
@@ -66,8 +66,7 @@ func pdfTools(lib *rag.Library) []Tool {
 	}
 }
 
-// urlGuard remembers the URLs the user typed or a search returned. fetch_url opens only those, so a model
-// steered by a hostile page cannot be made to request an attacker's URL carrying private text in its query.
+// urlGuard allows fetch_url only for user-typed or searched URLs.
 type urlGuard struct {
 	mu   sync.Mutex
 	seen map[string]bool
@@ -120,7 +119,6 @@ func webTools(w *web.Client, g *urlGuard) []Tool {
 	}
 }
 
-// Team is the supervisor and what it needs to answer.
 type Team struct {
 	cfg  config.Config
 	chat llm.Chat
@@ -132,7 +130,7 @@ func NewTeam(cfg config.Config, chat llm.Chat, lib *rag.Library, w *web.Client) 
 	return &Team{cfg, chat, lib, w}
 }
 
-// Ask answers one question with a fresh set of agents whose steps are reported to trace.
+// Ask answers with fresh agents; steps go to trace.
 func (t *Team) Ask(ctx context.Context, question string, history []llm.Message, trace func(Event)) (string, error) {
 	guard := &urlGuard{seen: map[string]bool{}}
 	guard.remember(question)
@@ -150,7 +148,7 @@ func (t *Team) Ask(ctx context.Context, question string, history []llm.Message, 
 			Args: map[string]string{"task": "string: a self-contained question or instruction"},
 			Run: func(ctx context.Context, args map[string]any) (string, error) {
 				task := str(args, "task")
-				if len(task) > maxTaskChars { // a model-written task (the writer's notes) must not fill the whole context
+				if len(task) > maxTaskChars { // model-written task must not fill the context
 					task = strings.ToValidUTF8(task[:maxTaskChars], "") + "\n[task cut: too long]"
 				}
 				return a.Run(ctx, task, nil)

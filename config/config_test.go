@@ -48,7 +48,7 @@ func TestApplyEnv(t *testing.T) {
 	if strings.Join(c.AllowedHosts, ",") != "talos.lan,box.local" {
 		t.Fatalf("allowed hosts: %q", c.AllowedHosts)
 	}
-	// unset and empty variables change nothing, and the file's values are the base
+	// unset or empty variables keep file values
 	p := filepath.Join(t.TempDir(), "t.json")
 	os.WriteFile(p, []byte(`{"llm":{"model":"from-file","base_url":"http://file:1"}}`), 0o644)
 	c, _ = LoadEnv(p, func(k string) string { return map[string]string{"TALOS_LLM_MODEL": ""}[k] })
@@ -99,7 +99,7 @@ func TestValidateListenBaseURLsAndAllowedHosts(t *testing.T) {
 	}
 }
 
-// An environment value that makes the configuration invalid is an error at start-up, not a surprise later.
+// Invalid environment values fail at start-up.
 func TestLoadEnvRejectsBadValues(t *testing.T) {
 	for k, v := range map[string]string{
 		"TALOS_LISTEN": "nonsense", "TALOS_LLM_BASE_URL": "ollama:11434", "TALOS_EMBED_BASE_URL": "x", "TALOS_ALLOWED_HOSTS": "talos.lan:8080",

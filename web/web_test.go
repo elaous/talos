@@ -82,7 +82,7 @@ func TestLocalSearxngWorksWithoutOpeningFetchURL(t *testing.T) {
 	}
 }
 
-// proxyServer records the requests that reach it, like an HTTP proxy would see them.
+// proxyServer records the requests it receives.
 func proxyServer(t *testing.T) (*httptest.Server, *[]string) {
 	var mu sync.Mutex
 	var seen []string
@@ -104,12 +104,12 @@ func TestProxyIsUsedButTargetsAreStillChecked(t *testing.T) {
 	t.Setenv("no_proxy", "")
 	c := New("", false)
 
-	// a public address goes through the proxy, which itself is on loopback and so exempt from the check
+	// Loopback proxy is exempt from the check.
 	got, err := c.Fetch(context.Background(), "http://203.0.113.9/page", 100)
 	if err != nil || got != "via proxy" || len(*seen) != 1 || (*seen)[0] != "http://203.0.113.9/page" {
 		t.Fatalf("public target via proxy: %q %v %v", got, err, *seen)
 	}
-	// private targets are refused before the proxy is asked, so it cannot be used to reach the LAN
+	// private targets are refused before reaching the proxy
 	for _, u := range []string{"http://10.1.2.3/", "http://192.168.0.1/admin", "http://169.254.169.254/latest/meta-data/", "http://[::1]:9/", "http://100.100.100.200/"} {
 		if _, err := c.Fetch(context.Background(), u, 100); err == nil {
 			t.Errorf("%s was fetched through the proxy", u)
@@ -151,8 +151,7 @@ func TestZonedIPv6AddressesAreStillChecked(t *testing.T) {
 	}
 }
 
-// The proxy's own address is dialled unchecked, because it is usually on the LAN. That exemption must not be
-// reachable as a fetch target: not directly, not by another spelling, and not through a redirect.
+// Proxy exemption must not extend to other fetch targets.
 func TestProxyAddressIsNotAFetchTarget(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
@@ -161,7 +160,7 @@ func TestProxyAddressIsNotAFetchTarget(t *testing.T) {
 		mu.Lock()
 		seen = append(seen, r.URL.String())
 		mu.Unlock()
-		if r.URL.String() == "http://203.0.113.9/redirect" { // a "public" page that redirects to the proxy's admin port
+		if r.URL.String() == "http://203.0.113.9/redirect" { // public page redirecting to the proxy's admin port
 			http.Redirect(w, r, proxy.URL+"/admin/secret", http.StatusFound)
 			return
 		}
@@ -181,7 +180,7 @@ func TestProxyAddressIsNotAFetchTarget(t *testing.T) {
 	if _, err := c.Fetch(context.Background(), "http://203.0.113.9/redirect", 100); err == nil {
 		t.Error("a redirect to the proxy's own address was followed")
 	}
-	// the exemption is for the proxy alone: any other loopback server is still refused
+	// only the proxy is exempt; other loopback servers are refused
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<p>other</p>")) }))
 	defer other.Close()
 	if got, err := c.Fetch(context.Background(), other.URL, 100); err == nil || !strings.Contains(err.Error(), "private address") {
@@ -196,7 +195,7 @@ func TestProxyAddressIsNotAFetchTarget(t *testing.T) {
 	}
 }
 
-// A proxy named by hostname (the usual corporate setup) must work even though its address is private.
+// A hostname-named proxy must work despite a private address.
 func TestProxyGivenByHostnameWorks(t *testing.T) {
 	proxy, seen := proxyServer(t)
 	addr := strings.TrimPrefix(proxy.URL, "http://")
@@ -205,7 +204,7 @@ func TestProxyGivenByHostnameWorks(t *testing.T) {
 	if got, err := c.Fetch(context.Background(), "http://203.0.113.9/x", 100); err != nil || got != "via proxy" || len(*seen) != 1 {
 		t.Fatalf("hostname proxy: %q %v %v", got, err, *seen)
 	}
-	// and it is still the only thing exempt: a private target is refused before reaching it
+	// private targets are still refused before reaching the proxy
 	if _, err := c.Fetch(context.Background(), "http://10.0.0.5/", 100); err == nil || len(*seen) != 1 {
 		t.Fatalf("private target through a hostname proxy: %v %v", err, *seen)
 	}
@@ -219,8 +218,7 @@ func TestNameOnlyTheProxyCanResolvePassesThrough(t *testing.T) {
 	}
 }
 
-// Round 5, blocker 1: a non-ASCII spelling of the proxy's address must not be dialled unchecked. HTTPS_PROXY is
-// left unset so https targets go direct, which is the path where the exemption used to apply.
+// A non-ASCII proxy address must not be dialled unchecked.
 func TestNonASCIISpellingOfTheProxyAddressIsRefused(t *testing.T) {
 	var mu sync.Mutex
 	hits := 0
@@ -266,7 +264,7 @@ func TestNonASCIISpellingOfTheProxyAddressIsRefused(t *testing.T) {
 	}
 }
 
-// Round 5, blocker 2: names a pure-Go resolver rejects but a C library (and so a local proxy) accepts as loopback.
+// Spellings a C resolver accepts as loopback must be refused.
 func TestLegacyAndLocalhostSpellingsAreRefusedBeforeTheProxy(t *testing.T) {
 	proxy, seen := proxyServer(t)
 	setProxy(t, proxy.URL)
@@ -286,7 +284,7 @@ func TestLegacyAndLocalhostSpellingsAreRefusedBeforeTheProxy(t *testing.T) {
 	if len(*seen) != 0 {
 		t.Fatalf("the proxy was asked for: %v", *seen)
 	}
-	// public addresses in those spellings still work, and so do ordinary names the proxy alone resolves
+	// public addresses in those spellings still work
 	for _, u := range []string{"http://134744072/", "http://0x8.8.8.8/", "http://203.0.113.9/", "http://intranet.corp.invalid/", "http://xn--bcher-kva.example.invalid/"} {
 		if got, err := c.Fetch(context.Background(), u, 100); err != nil || got != "via proxy" {
 			t.Errorf("%s: %q %v", u, got, err)
@@ -312,7 +310,7 @@ func TestParseLegacyIPv4(t *testing.T) {
 	}
 }
 
-// Without any proxy, every spelling is judged on the address actually dialled.
+// Without a proxy, judge each spelling by the dialled address.
 func TestDirectFetchesJudgeTheDialledAddress(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "")
 	t.Setenv("http_proxy", "")
@@ -329,8 +327,7 @@ func TestDirectFetchesJudgeTheDialledAddress(t *testing.T) {
 	}
 }
 
-// connectProxy is an HTTP proxy that records the CONNECT targets (https) and request URLs (http) it is asked
-// for, and refuses to actually connect, so a fetch to it ends in an error: what matters is what it was asked.
+// connectProxy records CONNECT targets and request URLs, and never connects.
 func connectProxy(t *testing.T) (*httptest.Server, func() []string) {
 	var mu sync.Mutex
 	var seen []string
@@ -348,9 +345,7 @@ func connectProxy(t *testing.T) (*httptest.Server, func() []string) {
 	return srv, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), seen...) }
 }
 
-// Round 6: the host the proxy receives in a CONNECT line is spelled by net/http (IDNA mapping), so the host that
-// is validated must be spelled the same way: an ideographic full stop, a doubled dot or fullwidth digits must not
-// turn a refused address into an accepted one.
+// Validated host must match the spelling sent to the proxy.
 func TestHTTPSTargetsReachTheProxyOnlyIfPublic(t *testing.T) {
 	proxy, seen := connectProxy(t)
 	setProxy(t, proxy.URL)
@@ -399,7 +394,7 @@ func TestZeroNetworkAndAzureWireServerAreBlocked(t *testing.T) {
 	}
 }
 
-// A NO_PROXY entry that happens to match the old probe host must not break every proxied request.
+// A NO_PROXY entry must not break proxied requests.
 func TestProxyTransportsAreMadeOnDemand(t *testing.T) {
 	proxy, seen := proxyServer(t)
 	setProxy(t, proxy.URL)
@@ -436,8 +431,7 @@ func TestValidateProxiedTargetDirectly(t *testing.T) {
 	}
 }
 
-// Round 7: for plain-http targets net/http spells the host differently than for https, so the request is rebuilt
-// with the validated spelling; what the proxy is asked for is what was checked.
+// Plain-http requests must be sent with the validated host spelling.
 func TestPlainHTTPTargetsAreSentUnderTheValidatedName(t *testing.T) {
 	proxy, seen := connectProxy(t)
 	setProxy(t, proxy.URL)
@@ -454,7 +448,7 @@ func TestPlainHTTPTargetsAreSentUnderTheValidatedName(t *testing.T) {
 	got := seen()
 	sort.Strings(got)
 	want := []string{
-		"GET http://203.0.113.9:81/q?a=1", // the path and query are kept, userinfo is not part of the host
+		"GET http://203.0.113.9:81/q?a=1", // userinfo is not part of the host
 		"GET http://[2606:4700:4700::1111]:8080/y",
 		"GET http://example.invalid/x",
 		"GET http://xn--n-nga1b.example.invalid/z", // mapped to lower case, then punycoded
@@ -478,7 +472,7 @@ func TestNumericLookingFirstLabelsAreStillRealSites(t *testing.T) {
 	}
 }
 
-// Hosts whose IDNA mapping fails: net/http would put the raw UTF-8 on the CONNECT line, so they are refused.
+// Refuse IDNA failures; raw UTF-8 would reach CONNECT.
 func TestHostsThatFailIDNAAreRefused(t *testing.T) {
 	for _, h := range []string{"localhost․", "local‍host", "127.0.0.1﹒", "a　b.example.invalid", "x‌.example.invalid"} {
 		if got, err := normalizeHost(h); err == nil {
@@ -496,7 +490,7 @@ func TestHostsThatFailIDNAAreRefused(t *testing.T) {
 	}
 }
 
-// The per-proxy transport map is filled on first use: many first requests at once must be safe (run with -race).
+// Concurrent first use of per-proxy transports must be race-free.
 func TestConcurrentFirstUseOfAProxyIsSafe(t *testing.T) {
 	proxy, seen := proxyServer(t)
 	setProxy(t, proxy.URL)

@@ -176,7 +176,7 @@ func stop() {
 
 var libPolling bool
 
-// refreshLibrary reads the library once, and keeps reading while a run is indexing.
+// refreshLibrary reads the library; repeats while indexing.
 func refreshLibrary() {
 	mu.Lock()
 	if libPolling {
@@ -226,7 +226,7 @@ func reindex() {
 	}()
 }
 
-// upload posts the chosen files with fetch, so the page (and the conversation in it) stays as it is.
+// upload posts files with fetch, keeping the page state.
 func upload() {
 	form := js.Global().Get("document").Call("getElementById", "up-form")
 	input := js.Global().Get("document").Call("getElementById", "up-files")
@@ -283,7 +283,7 @@ func Trace(steps []step, running bool) xango.Node {
 		}
 		return out
 	}()
-	if running { // `open` is a boolean attribute: present means open, so it is set only while working
+	if running { // `open` is boolean: present means open
 		return xango.El("details", []xango.Attr{xango.A("class", "trace"), xango.A("open", "open")}, xango.El("summary", nil, xango.Child(label)), xango.Child(list))
 	}
 	return xango.El("details", []xango.Attr{xango.A("class", "trace")}, xango.El("summary", nil, xango.Child(label)), xango.Child(list))

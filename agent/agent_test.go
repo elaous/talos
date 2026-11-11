@@ -243,8 +243,8 @@ func TestFenceEscapeIsCaseAndLookalikeProof(t *testing.T) {
 		if strings.Count(last, "</tool_result>") != 1 || !strings.HasSuffix(last, "</tool_result>\nContinue.") {
 			t.Errorf("%q: the real closing tag is not the single last one: %q", bad, last)
 		}
-		// whatever the attacker wrote is now the visibly broken "< /tool_result", never a working closing tag
-		// (judged without the production regexp, which would otherwise grade itself)
+		// injected closers must not stay valid tags
+		// independent check: not the production regexp
 		body = strings.ReplaceAll(body, "< /tool_result", "§")
 		norm := strings.NewReplacer("＜", "<", " ", "").Replace(strings.ToLower(body))
 		if strings.Contains(norm, "</toolresult") || strings.Contains(norm, "</tool_result") {

@@ -1,11 +1,4 @@
-# Override: keep the PDFs and the index in folders on the host (./pdfs and ./data) instead of named volumes.
-#
-#   make docker-up-host
-#
-# The container then runs as you (so it can write there), and the folders must exist and be yours: the make
-# target creates them. With a plain `docker compose -f docker-compose.yml -f docker-compose.hostdirs.yml up`,
-# run `mkdir -p pdfs data` first and set TALOS_UID=$(id -u) TALOS_GID=$(id -g). Docker Desktop and rootless Docker
-# map users differently; if writes fail, talos says so at start-up and the named volumes (the default) always work.
+# Binds ./pdfs and ./data; must be writable by TALOS_UID:TALOS_GID.
 
 services:
   talos:

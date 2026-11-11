@@ -38,8 +38,7 @@ func readCompose(t *testing.T, path string) composeFile {
 	return c
 }
 
-// The security posture of the compose file is a set of parsed values, so a comment or an unrelated line cannot
-// satisfy these checks.
+// Compose security settings are parsed values, not text matches.
 func TestComposeSecurityPosture(t *testing.T) {
 	c := readCompose(t, "../../docker-compose.yml")
 	talos, ok := c.Services["talos"]
@@ -77,7 +76,7 @@ func TestComposeSecurityPosture(t *testing.T) {
 			t.Errorf("named volume %s is not declared", name)
 		}
 	}
-	// the optional Ollama service: behind a profile, nothing published, a pinned release
+	// optional Ollama service: profile-gated, unpublished, pinned
 	ol := c.Services["ollama"]
 	if len(ol.Ports) != 0 || !slices_contains(ol.Profiles, "ollama") {
 		t.Errorf("ollama: ports %v profiles %v", ol.Ports, ol.Profiles)
@@ -103,7 +102,7 @@ func TestComposeHostDirsOverride(t *testing.T) {
 	}
 }
 
-// Each variable the compose file sets must be read by the code, and must change only what it names.
+// Compose variables must be read and change only their target.
 func TestComposeEnvironmentIsReadOneVariableAtATime(t *testing.T) {
 	talos := readCompose(t, "../../docker-compose.yml").Services["talos"]
 	base := config.Default()
@@ -133,7 +132,7 @@ func TestComposeEnvironmentIsReadOneVariableAtATime(t *testing.T) {
 
 var dockerInstr = regexp.MustCompile(`^([A-Z]+)\s+(.*)$`)
 
-// dockerfileInstructions returns the instructions of a Dockerfile: comments removed and continuation lines joined.
+// dockerfileInstructions joins continuation lines; drops comments.
 func dockerfileInstructions(t *testing.T) map[string][]string {
 	t.Helper()
 	b, err := os.ReadFile("../../Dockerfile")

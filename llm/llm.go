@@ -1,4 +1,4 @@
-// Package llm talks to local model servers over HTTP. Nothing here needs more than net/http.
+// Package llm talks to local model servers over HTTP.
 package llm
 
 import (
@@ -19,7 +19,7 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// Chat generates text; Embedder turns text into vectors. Agents and the library depend only on these.
+// Chat generates text; Embedder turns text into vectors.
 type Chat interface {
 	Chat(ctx context.Context, model string, msgs []Message) (string, error)
 }
@@ -27,7 +27,6 @@ type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
-// NewChat and NewEmbedder pick the client for an endpoint's backend.
 func NewChat(e config.Endpoint, temperature float64, numCtx int) (Chat, error) {
 	switch e.Backend {
 	case "ollama":

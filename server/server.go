@@ -1,7 +1,4 @@
-// Package server is talos's HTTP face: a small JSON API and the WASM UI.
-//
-// There is no login, so it listens on loopback by default. Every state-changing request must come from the
-// same origin, which stops a web page you happen to visit from driving the agents through localhost.
+// Package server serves the JSON API and the WASM UI.
 package server
 
 import (
@@ -39,19 +36,18 @@ type Server struct {
 	Lib    *rag.Library
 	PDFDir string
 	UI     fs.FS
-	// AllowedHosts are the Host header values (without port) a request may carry, besides loopback names.
-	// Empty means "any": only correct when the server is meant to be reached by other names (see config).
+	// Host names (without port) allowed besides loopback. Empty allows any.
 	AllowedHosts []string
-	// Ctx ends the server's background work (indexing). Nil means it never ends.
+	// Cancels background indexing; nil never cancels.
 	Ctx     context.Context
 	wg      sync.WaitGroup // background ingests
-	up      chan struct{}  // limits concurrent uploads, which are buffered in memory
+	up      chan struct{}  // limits concurrent buffered uploads
 	writeMu sync.Mutex     // one upload writes into the library at a time
 
 	mu       sync.Mutex
 	jobs     map[string]*job
 	indexing bool
-	rerun    bool // files arrived while indexing: run once more when it ends
+	rerun    bool // files arrived while indexing: run again
 	closed   bool // Wait was called: StartIngest refuses
 	lastErr  string
 	lastAdd  int
@@ -60,19 +56,18 @@ type Server struct {
 const (
 	maxRunning   = 4   // concurrent agent runs
 	maxJobs      = 100 // jobs kept (running or finished)
-	maxHistory   = 10  // messages of earlier conversation sent along
+	maxHistory   = 10  // history messages sent along
 	maxMsgLen    = 16 << 10
-	maxHistChars = 24 << 10 // total characters of earlier conversation sent along
+	maxHistChars = 24 << 10 // total characters of history sent along
 	maxUploads   = 2
 )
 
-// uploadTimeout is how long a whole upload may take to arrive.
 var uploadTimeout = 2 * time.Minute
 
-// Wait blocks until background indexing has stopped (after Ctx is cancelled, at most one file's worth).
+// Wait blocks until background indexing stops.
 func (s *Server) Wait() {
 	s.mu.Lock()
-	s.closed = true // no new indexing after this: wg.Add must not race with Wait
+	s.closed = true // wg.Add must not race with Wait
 	s.mu.Unlock()
 	s.wg.Wait()
 }
@@ -109,10 +104,7 @@ func (s *Server) Handler() http.Handler {
 	return s.guard(mux)
 }
 
-// guard refuses requests a browser would send on behalf of another site:
-//   - a Host that is not ours (DNS rebinding makes a hostile page and our server "same origin" under its own
-//     name, so Origin vs Host alone proves nothing);
-//   - Sec-Fetch-Site: cross-site, and for anything but GET an Origin that is not Host.
+// Origin alone is not enough; also checks Host.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostOK(r.Host) {
@@ -143,7 +135,7 @@ func (s *Server) hostOK(hostport string) bool {
 	if sh, _, err := net.SplitHostPort(hostport); err == nil {
 		h = sh
 	}
-	h = strings.TrimSuffix(strings.Trim(strings.ToLower(h), "[]"), ".") // "localhost." is the same name
+	h = strings.TrimSuffix(strings.Trim(strings.ToLower(h), "[]"), ".") // trailing dot: same name
 	switch h {
 	case "localhost", "127.0.0.1", "::1":
 		return true
@@ -182,7 +174,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	if len(in.History) > maxHistory {
 		in.History = in.History[len(in.History)-maxHistory:]
 	}
-	for i := range in.History { // the client supplies history, so it may not smuggle in system prompts
+	for i := range in.History { // client history may not carry system roles
 		if in.History[i].Role != "assistant" {
 			in.History[i].Role = "user"
 		}
@@ -190,7 +182,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 			in.History[i].Content = in.History[i].Content[:maxMsgLen]
 		}
 	}
-	for n := 0; ; { // drop the oldest messages until the history fits its character budget
+	for n := 0; ; { // drop oldest messages until history fits budget
 		n = 0
 		for _, m := range in.History {
 			n += len(m.Content)
@@ -232,7 +224,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
 }
 
-// gc forgets finished jobs older than an hour, and the oldest finished ones beyond maxJobs. Caller holds s.mu.
+// gc drops old finished jobs. Caller holds s.mu.
 func (s *Server) gc() {
 	type fin struct {
 		id string
@@ -331,8 +323,7 @@ func (s *Server) library(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
-// StartIngest indexes the PDF folder in the background. If a run is already going, it makes that run go
-// around once more when it ends (so a file saved after its walk is still picked up) and returns false.
+// Indexes PDFs in background; a busy run repeats once more.
 func (s *Server) StartIngest() bool {
 	s.mu.Lock()
 	if s.closed {
@@ -353,7 +344,7 @@ func (s *Server) StartIngest() bool {
 			n, err := s.Lib.IngestDir(s.ctx(), s.PDFDir)
 			s.mu.Lock()
 			s.lastAdd += n
-			s.lastErr = "" // the latest pass decides what is shown
+			s.lastErr = ""
 			if err != nil {
 				s.lastErr = err.Error()
 			}
@@ -375,9 +366,7 @@ func (s *Server) ingest(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// upload takes PDFs from a multipart form. Every part is read and checked first, so a bad one saves nothing,
-// and each file is written under a temporary name and renamed, so an ingest never reads a half-written PDF.
-// A file with an existing name replaces it: that is how a library document is updated.
+// Saves all uploaded PDFs or none; existing names are replaced.
 func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.up <- struct{}{}:
@@ -391,7 +380,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
-	// A client that connects and then stalls must not hold an upload slot for ever.
+	// Stalled clients must not hold an upload slot.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -456,10 +445,10 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// probeTemp is os.CreateTemp; tests replace it, since a test run as root can write anywhere.
+// Replaced in tests: root can write anywhere.
 var probeTemp = os.CreateTemp
 
-// probeDir reports whether files can be created in dir (creating the folder if it is missing).
+// probeDir reports whether dir accepts new files.
 func probeDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -472,20 +461,18 @@ func probeDir(dir string) error {
 	return os.Remove(f.Name())
 }
 
-// rename is os.Rename; tests replace it to make a late rename fail or to look at the state between steps.
+// Replaced in tests to inject rename failures.
 var rename = os.Rename
 
-// link and writeFile are what the backup step uses; tests replace them to make the copy fallback fail.
+// Replaced in tests to inject backup failures.
 var (
 	link      = os.Link
 	writeFile = os.WriteFile
 )
 
-// backupSuffix marks the copy of a file that an upload is about to replace.
 const backupSuffix = ".replaced~"
 
-// uniqueKeptName is the first of x.pdf.recovered~, x.pdf.recovered~2, ... that does not exist, so a second failed
-// restore never overwrites the copy an earlier one kept.
+// Returns a free kept-copy name; never overwrites an earlier one.
 func uniqueKeptName(to string) string {
 	name := to + keptSuffix
 	for i := 2; ; i++ {
@@ -496,17 +483,11 @@ func uniqueKeptName(to string) string {
 	}
 }
 
-// keptSuffix marks the only remaining copy of a file whose restore failed. It is never swept.
+// Kept copies are never swept at startup.
 const keptSuffix = ".recovered~"
 
-// writeAll saves every file or none, unless the process is killed half way, and a file that is replaced is never
-// missing or half-written: destinations are checked first, all data goes to temporary names, each existing
-// destination gets a hard-linked (else copied) backup, and then every temporary file is renamed over its
-// destination, which is atomic. If any step fails, the files created so far are removed and the backups put
-// back; if a restore itself fails the backup is kept, as the only copy of the old file. On success the backups
-// are deleted. A kill between two renames leaves some files replaced and some not, each of them whole; the
-// leftovers (backups, temporary files) are removed when the server starts, except a *.recovered~ file, which
-// is the old copy of a file whose restore failed and is kept for a person to look at.
+// Saves all files or none, via atomic renames and backups.
+// Startup sweep must skip *.recovered~ files.
 func writeAll(dir string, files map[string][]byte) error {
 	type tmp struct{ from, to, backup string }
 	var done []tmp
@@ -538,12 +519,11 @@ func writeAll(dir string, files map[string][]byte) error {
 	}
 	var placed []tmp // destinations already replaced or created
 	undo := func() {
-		kept := map[string]bool{} // backups whose restore failed: they are now the only copy of the old file
+		kept := map[string]bool{} // backups whose restore failed; kept, not removed
 		for i := len(placed) - 1; i >= 0; i-- {
 			if t := placed[i]; t.backup != "" {
 				if err := os.Rename(t.backup, t.to); err != nil { // atomically puts the old file back
-					// The restore failed, so this is now the only copy of the old file. Rename it to a name the
-					// startup sweep leaves alone, so it survives for whoever has to put it back by hand.
+					// Keep the backup under a name the startup sweep skips.
 					if os.Rename(t.backup, uniqueKeptName(t.to)) == nil {
 						continue
 					}
@@ -571,7 +551,7 @@ func writeAll(dir string, files map[string][]byte) error {
 					rerr = writeFile(t.backup, old, 0o644)
 				}
 				if rerr != nil {
-					os.Remove(t.backup) // a partial copy must not survive as a "backup"
+					os.Remove(t.backup) // partial copy must not look like a backup
 					t.backup = ""
 					undo()
 					return rerr
@@ -596,9 +576,7 @@ func writeAll(dir string, files map[string][]byte) error {
 	return nil
 }
 
-// removeStaleBackups deletes what a crashed upload left behind: backups and temporary files. It lists the folder
-// (no pattern matching, so odd characters in the folder's name cannot disable it) and touches only regular
-// files with those exact markers.
+// Removes backups and temp files left by a crashed upload.
 func removeStaleBackups(dir string) {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
