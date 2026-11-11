@@ -409,7 +409,6 @@ func TestLongIngestSavesProgressWhileRunning(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() { l.IngestDir(ctx, dir); close(done) }()
-	// a and b are saved while c.pdf blocks
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if again, err := Open(idx, emb, "e", 400, 50); err == nil && len(again.Sources()) == 2 {
@@ -437,7 +436,7 @@ func TestSlowPDFReadIsNotRememberedAsBad(t *testing.T) {
 	if len(l.bad) != 0 {
 		t.Fatalf("a timeout was remembered as permanent: %v", l.bad)
 	}
-	extractPages = real // unchanged file is retried
+	extractPages = real
 	if _, err := l.IngestDir(context.Background(), dir); err != nil || l.Sources()["big.pdf"] == 0 {
 		t.Fatalf("not retried: %v %v", err, l.Sources())
 	}

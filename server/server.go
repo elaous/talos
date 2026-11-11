@@ -104,7 +104,7 @@ func (s *Server) Handler() http.Handler {
 	return s.guard(mux)
 }
 
-// Refuses foreign Hosts and cross-site requests; Origin alone is not enough.
+// Origin alone is not enough; also checks Host.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostOK(r.Host) {
@@ -344,7 +344,7 @@ func (s *Server) StartIngest() bool {
 			n, err := s.Lib.IngestDir(s.ctx(), s.PDFDir)
 			s.mu.Lock()
 			s.lastAdd += n
-			s.lastErr = "" // latest pass decides the shown error
+			s.lastErr = ""
 			if err != nil {
 				s.lastErr = err.Error()
 			}

@@ -17,7 +17,6 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     --mount=type=secret,id=cacert,required=false \
     set -eux; \
     if [ -f /run/secrets/cacert ]; then export SSL_CERT_FILE=/run/secrets/cacert; fi; \
-    # Generate UI sources, build WASM, then a static server.
     (cd /src/gojiberry && go run ./cmd/xgc /src/talos/ui); \
     mkdir -p /out/ui /out/data /out/pdfs; \
     GOOS=js GOARCH=wasm go build -trimpath -o /out/ui/main.wasm ./ui; \

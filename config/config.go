@@ -57,7 +57,7 @@ func Default() Config {
 	return c
 }
 
-// Load reads path over defaults; a missing file is not an error.
+// Missing file yields defaults without error.
 func Load(path string) (Config, error) {
 	c := Default()
 	b, err := os.ReadFile(path)
@@ -85,7 +85,7 @@ func LoadEnv(path string, getenv func(string) string) (Config, error) {
 	return c, nil
 }
 
-// Unset or empty variables change nothing; set ones override the file.
+// Empty variables are ignored; set ones override the file.
 func (c *Config) ApplyEnv(getenv func(string) string) {
 	if v := getenv("TALOS_LISTEN"); v != "" {
 		c.Listen = v

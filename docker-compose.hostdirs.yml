@@ -1,4 +1,4 @@
-# Override: binds ./pdfs and ./data. Folders must be writable by TALOS_UID:TALOS_GID.
+# Binds ./pdfs and ./data; must be writable by TALOS_UID:TALOS_GID.
 
 services:
   talos:

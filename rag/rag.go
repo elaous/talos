@@ -59,7 +59,7 @@ type diskIndex struct {
 	Bad    map[string]badFile
 }
 
-// Open loads path; a changed embModel or chunk setting starts empty.
+// Changed embModel or chunk settings start empty.
 func Open(path string, emb llm.Embedder, embModel string, chunkChars, overlap int) (*Library, error) {
 	l := &Library{path: path, emb: emb, size: chunkChars, overlap: overlap, files: map[string]string{}, bad: map[string]badFile{},
 		key: fmt.Sprintf("%s|%d|%d", embModel, chunkChars, overlap)}
@@ -179,7 +179,7 @@ func Split(text string, size, overlap int) []string {
 var errEmbed = errors.New("embedding failed")
 
 // IngestDir indexes changed PDFs under dir and drops removed ones.
-// Locks only to swap in finished files, never across embedding calls.
+// Lock only when swapping files, never across embedding.
 func (l *Library) IngestDir(ctx context.Context, dir string) (int, error) {
 	l.ingest.Lock()
 	defer l.ingest.Unlock()

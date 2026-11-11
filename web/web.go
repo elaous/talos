@@ -33,26 +33,26 @@ type Client struct {
 var blockedNets = func() []netip.Prefix {
 	var ps []netip.Prefix
 	for _, s := range []string{
-		"0.0.0.0/8",        // this network
-		"168.63.129.16/32", // Azure WireServer metadata address
-		"100.64.0.0/10",    // carrier-grade NAT; Alibaba metadata at 100.100.100.200
-		"198.18.0.0/15",    // benchmarking
-		"192.0.0.0/24",     // IETF protocol assignments
-		"240.0.0.0/4",      // reserved, including 255.255.255.255
-		"64:ff9b:1::/48",   // local-use NAT64
-		"fd00:ec2::/32",    // AWS IPv6 metadata
-		"fe80::/10",        // link-local
-		"fec0::/10",        // deprecated site-local
-		"2001:db8::/32",    // documentation
-		"2001::/32",        // Teredo
-		"::ffff:0:0/96",    // IPv4-mapped; caller unmaps first
+		"0.0.0.0/8",
+		"168.63.129.16/32",
+		"100.64.0.0/10",
+		"198.18.0.0/15",
+		"192.0.0.0/24",
+		"240.0.0.0/4",
+		"64:ff9b:1::/48",
+		"fd00:ec2::/32",
+		"fe80::/10",
+		"fec0::/10",
+		"2001:db8::/32",
+		"2001::/32",
+		"::ffff:0:0/96",
 	} {
 		ps = append(ps, netip.MustParsePrefix(s))
 	}
 	return ps
 }()
 
-// BlockedIP reports whether ip is not public, unwrapping NAT64 and 6to4.
+// BlockedIP reports non-public addresses, unwrapping NAT64 and 6to4.
 func BlockedIP(ip netip.Addr) bool {
 	ip = ip.Unmap().WithZone("") // a zone suffix would defeat the prefix tests below
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
@@ -76,7 +76,7 @@ func BlockedIP(ip netip.Addr) bool {
 	return false
 }
 
-// New builds a client. Unless allowPrivate, page fetches refuse non-public addresses.
+// New builds a client; allowPrivate lifts the page fetch check.
 // Proxied hosts are checked best-effort: the proxy resolves DNS again.
 func New(searxngURL string, allowPrivate bool) *Client {
 	plain := &net.Dialer{Timeout: 10 * time.Second}
@@ -220,7 +220,7 @@ func parseLegacyIPv4(s string) (netip.Addr, bool) {
 	return netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}), true
 }
 
-// Every label numeric: the name is an address spelling, not DNS.
+// All labels numeric: an address spelling, not DNS.
 func numericLabels(h string) bool {
 	for _, p := range strings.Split(h, ".") {
 		if p == "" {

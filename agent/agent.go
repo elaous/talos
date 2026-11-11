@@ -178,10 +178,10 @@ func ExtractJSON(s string) (map[string]any, bool) {
 	return nil, false
 }
 
-// closingTag matches fence closers with any case, spaces or fullwidth "<".
+// Matches fence closers: any case, spaces or fullwidth "<".
 var closingTag = regexp.MustCompile(`(?i)[<\x{FF1C}]\s*/\s*tool_?result`)
 
-// shortenCall keeps a tool call valid JSON while cutting long strings.
+// Keeps shortened calls valid JSON.
 func shortenCall(call map[string]any) string {
 	short := map[string]any{"tool": cutValue(call["tool"], 100)}
 	if args, ok := call["args"]; ok {
@@ -233,7 +233,7 @@ func cutValue(v any, max int) any {
 // maxContextChars bounds what one agent sends the model.
 const maxContextChars = 48000
 
-// compact trims old results and history; keeps system prompt and task.
+// Trims old results and history; keeps system prompt and task.
 func compact(msgs []llm.Message, limit, taskIdx int) []llm.Message {
 	size := func() (n int) {
 		for _, m := range msgs {

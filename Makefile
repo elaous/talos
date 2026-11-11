@@ -27,7 +27,6 @@ test:
 run: ui build
 	./bin/talos serve
 
-# --- Docker ---
 .PHONY: docker-build
 docker-build:
 	docker build --build-context gojiberry=$(GOJIBERRY) $(DOCKER_BUILD_FLAGS) -t talos:local .

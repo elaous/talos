@@ -104,7 +104,7 @@ func TestProxyIsUsedButTargetsAreStillChecked(t *testing.T) {
 	t.Setenv("no_proxy", "")
 	c := New("", false)
 
-	// proxy is on loopback, so it is exempt from the check
+	// Loopback proxy is exempt from the check.
 	got, err := c.Fetch(context.Background(), "http://203.0.113.9/page", 100)
 	if err != nil || got != "via proxy" || len(*seen) != 1 || (*seen)[0] != "http://203.0.113.9/page" {
 		t.Fatalf("public target via proxy: %q %v %v", got, err, *seen)
@@ -472,7 +472,7 @@ func TestNumericLookingFirstLabelsAreStillRealSites(t *testing.T) {
 	}
 }
 
-// Hosts failing IDNA mapping are refused: raw UTF-8 would reach CONNECT.
+// Refuse IDNA failures; raw UTF-8 would reach CONNECT.
 func TestHostsThatFailIDNAAreRefused(t *testing.T) {
 	for _, h := range []string{"localhost․", "local‍host", "127.0.0.1﹒", "a　b.example.invalid", "x‌.example.invalid"} {
 		if got, err := normalizeHost(h); err == nil {
