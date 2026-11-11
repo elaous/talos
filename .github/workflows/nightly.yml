@@ -20,14 +20,6 @@ jobs:
           path: talos
           persist-credentials: false
 
-      - name: Check out gojiberry
-        uses: actions/checkout@v4
-        with:
-          repository: elaous/gojiberry
-          path: gojiberry
-          token: ${{ secrets.GOJIBERRY_READ_TOKEN }}
-          persist-credentials: false
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

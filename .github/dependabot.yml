@@ -4,8 +4,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    ignore:
-      - dependency-name: github.com/elaous/gojiberry
   - package-ecosystem: docker
     directory: /
     schedule:
