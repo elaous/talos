@@ -20,17 +20,20 @@ browser (xango WASM) ──HTTP──> talos server ──> supervisor ─┬─
 - A model server: [Ollama](https://ollama.com) or any OpenAI-compatible server. Models are not bundled.
 - Docker 23+ with BuildKit and Compose, only for the container setup.
 
-## Dependency on gojiberry
+## Dependencies on gojiberry and xango
 
-talos imports the public module [`github.com/elaous/gojiberry`](https://github.com/elaous/gojiberry) as a normal Go
-module, so a fresh clone builds with no sibling checkout. `go.mod` pins it to commit `0595828fe084`
-(`v0.0.0-20261025214457-0595828fe084`).
+talos imports the public modules [`github.com/elaous/gojiberry`](https://github.com/elaous/gojiberry) and
+[`github.com/elaous/xango`](https://github.com/elaous/xango) as normal Go modules, so a fresh clone builds with no
+sibling checkout. `go.mod` pins gojiberry to commit `e1989ac1491c`
+(`v0.0.0-20261112103843-e1989ac1491c`) and xango to `v0.1.0`.
 
-- The UI generator is run from the module: `go tool xgc ui` (`make generate`), declared as a `tool` directive in `go.mod`.
-- To bump it, run `go get github.com/elaous/gojiberry@<commit-or-tag>`, then `go mod tidy`, `make generate`
-  and `make test`; commit `go.mod`, `go.sum` and any diff to `ui/main.xg.go`. Run `make ui` only to rebuild the
-  distribution. Dependabot proposes updates weekly.
-- gojiberry is licensed under AGPL-3.0 (see [Licence](#licence)).
+- The UI generator and runtime come from xango: `go tool xgc ui` (`make generate`) runs the `xgc` declared as a `tool`
+  directive in `go.mod`, and `ui/main.xg` imports `github.com/elaous/xango` and `github.com/elaous/xango/domrt`.
+- To bump xango, run `go get github.com/elaous/xango@<tag>`, then `go mod tidy`, `make generate` and `make test`;
+  commit `go.mod`, `go.sum` and the regenerated `ui/main.xg.go`. Run `make ui` only to rebuild the distribution.
+- To bump gojiberry, run `go get github.com/elaous/gojiberry@<commit-or-tag>` and the same follow-up steps.
+  Dependabot proposes updates weekly.
+- gojiberry and xango are licensed under AGPL-3.0 (see [Licence](#licence)).
 
 ## Run
 
