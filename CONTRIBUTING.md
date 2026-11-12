@@ -10,8 +10,8 @@ accepted under the [MIT licence](LICENSE).
 
 ## Development setup
 
-talos needs Go 1.26+. Its dependency on the public `gojiberry` module is fetched by the Go toolchain, so a fresh
-clone builds with no extra setup (see the README, "Dependency on gojiberry").
+talos needs Go 1.26+. Its dependencies on the public `gojiberry` and `xango` modules are fetched by the Go toolchain,
+so a fresh clone builds with no extra setup (see the README, "Dependencies on gojiberry and xango").
 
 ```bash
 make test                       # go vet + go test for all packages, and a WASM vet of ./ui
@@ -39,6 +39,6 @@ anything under `.github/workflows/` changes.
 ## Continuous integration
 
 Workflows run on every pull request, including those from forks and from Dependabot; none of them needs a repository
-secret. A pull request that bumps `gojiberry` MUST also commit the regenerated `ui/main.xg.go`.
+secret. A pull request that bumps `xango` MUST also commit the regenerated `ui/main.xg.go`.
 The PR workflow runs `make generate` and fails on any diff, so a maintainer MUST regenerate `ui/main.xg.go` on a
-Dependabot `gojiberry` pull request (`make generate`, then commit the result).
+Dependabot `xango` pull request (`make generate`, then commit the result).

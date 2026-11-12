@@ -2,13 +2,14 @@ github.com/agext/levenshtein v1.2.1 h1:QmvMAjj2aEICytGiWzmxoE0x2KZvE0fvmqMOfy2tj
 github.com/agext/levenshtein v1.2.1/go.mod h1:JEDfjyjHDjOF/1e4FlBE/PkbqA9OfWu2ki2W0IB5558=
 github.com/apparentlymart/go-textseg/v15 v15.0.0 h1:uYvfpb3DyLSCGWnctWKGj857c6ew1u1fNQOlOtuGxQY=
 github.com/apparentlymart/go-textseg/v15 v15.0.0/go.mod h1:K8XmNZdhEBkdlyDdvbmmsvpAG721bKi0joRfFdHIWJ4=
-github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dslipak/pdf v0.0.2 h1:djAvcM5neg9Ush+zR6QXB+VMJzR6TdnX766HPIg1JmI=
 github.com/dslipak/pdf v0.0.2/go.mod h1:2L3SnkI9cQwnAS9gfPz2iUoLC0rUZwbucpbKi5R1mUo=
-github.com/elaous/gojiberry v0.0.0-20261025214457-0595828fe084 h1:nQwMLwUZHbaXGibZLQ/FEIQu/u35cUmTTxjjv5nRRfI=
-github.com/elaous/gojiberry v0.0.0-20261025214457-0595828fe084/go.mod h1:8wf4kKBz77G8aMWIrGg2lTDr+oP7JeKM7DV+7rRhwDY=
+github.com/elaous/gojiberry v0.0.0-20261112103843-e1989ac1491c h1:5WSy66nSncWq2pq8GKZ54pW7bstHfrngu8h71T1pYTo=
+github.com/elaous/gojiberry v0.0.0-20261112103843-e1989ac1491c/go.mod h1:8TXtszkxej9ehnHOwHvXRU/5pXEtYHXkjYwhLUkaa8Y=
+github.com/elaous/xango v0.1.0 h1:Bvnrmg0k9P7zPu7dbluB0AEuUk7gLwRn3I+sp1IALds=
+github.com/elaous/xango v0.1.0/go.mod h1:hEZDc6TJkXc65vWG2ojDgkjKYMeNKInTwxt8IV/L0W4=
 github.com/go-test/deep v1.0.3 h1:ZrJSEWsXzPOxaZnFteGEfooLba+ju3FYIbOrS+rQd68=
 github.com/go-test/deep v1.0.3/go.mod h1:wGDj63lr65AM2AQyKZd/NYHGb0R+1RLqB8NKt3aSFNA=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
