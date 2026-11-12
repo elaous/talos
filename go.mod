@@ -3,7 +3,7 @@ module github.com/elaous/talos
 go 1.26.0
 
 require (
-	github.com/elaous/gojiberry v0.0.0-20261112103843-e1989ac1491c
+	github.com/elaous/gojiberry v0.1.1
 	github.com/elaous/xango v0.1.0
 	golang.org/x/net v0.62.0
 	gopkg.in/yaml.v3 v3.0.1
