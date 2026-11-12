@@ -24,8 +24,8 @@ browser (xango WASM) ──HTTP──> talos server ──> supervisor ─┬─
 
 talos imports the public modules [`github.com/elaous/gojiberry`](https://github.com/elaous/gojiberry) and
 [`github.com/elaous/xango`](https://github.com/elaous/xango) as normal Go modules, so a fresh clone builds with no
-sibling checkout. `go.mod` pins gojiberry to commit `e1989ac1491c`
-(`v0.0.0-20261112103843-e1989ac1491c`) and xango to `v0.1.0`.
+sibling checkout. `go.mod` pins gojiberry to the release tag `v0.1.1`
+and xango to `v0.1.0`; both pins are release tags.
 
 - The UI generator and runtime come from xango: `go tool xgc ui` (`make generate`) runs the `xgc` declared as a `tool`
   directive in `go.mod`, and `ui/main.xg` imports `github.com/elaous/xango` and `github.com/elaous/xango/domrt`.
