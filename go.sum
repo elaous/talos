@@ -6,10 +6,10 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dslipak/pdf v0.0.2 h1:djAvcM5neg9Ush+zR6QXB+VMJzR6TdnX766HPIg1JmI=
 github.com/dslipak/pdf v0.0.2/go.mod h1:2L3SnkI9cQwnAS9gfPz2iUoLC0rUZwbucpbKi5R1mUo=
-github.com/elaous/gojiberry v0.1.1 h1:YYB+6MspL/xVcayvHhPqegryjZ6b485F4Peeww5MlfY=
-github.com/elaous/gojiberry v0.1.1/go.mod h1:VwX1K79qk3rf/tEUn7fsX3UzKYww8qE8MkKN5q/wgdY=
-github.com/elaous/xango v0.1.0 h1:Bvnrmg0k9P7zPu7dbluB0AEuUk7gLwRn3I+sp1IALds=
-github.com/elaous/xango v0.1.0/go.mod h1:hEZDc6TJkXc65vWG2ojDgkjKYMeNKInTwxt8IV/L0W4=
+github.com/elaous/gojiberry v0.1.2 h1:aY2v4tUj+RULpSv2ev9jbQRiejMzyCBDc7B9At82ldQ=
+github.com/elaous/gojiberry v0.1.2/go.mod h1:1XFEmxQzpKrNlK1NJvhdpsjs+gCwIGAB41GT8sC2Zdc=
+github.com/elaous/xango v0.1.1 h1:LjxNPU21kFi2hvALfMbacEjWcsuKy5mRo554feBcYak=
+github.com/elaous/xango v0.1.1/go.mod h1:hEZDc6TJkXc65vWG2ojDgkjKYMeNKInTwxt8IV/L0W4=
 github.com/go-test/deep v1.0.3 h1:ZrJSEWsXzPOxaZnFteGEfooLba+ju3FYIbOrS+rQd68=
 github.com/go-test/deep v1.0.3/go.mod h1:wGDj63lr65AM2AQyKZd/NYHGb0R+1RLqB8NKt3aSFNA=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
