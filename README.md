@@ -2,8 +2,8 @@
 
 A local multi-agent RAG assistant, written in Go. A **supervisor** agent delegates to specialists — a
 **PDF researcher** (semantic search over your PDF library), a **web researcher** (search + page reading) and a
-**writer** — all running on models you host yourself. The UI is a gojiberry (xango) WASM app (see
-[Dependency on gojiberry](#dependency-on-gojiberry)).
+**writer** — all running on models you host yourself. The UI is a WASM app built with gojiberry and xango (see
+[Dependencies on gojiberry and xango](#dependencies-on-gojiberry-and-xango)).
 
 No Python: the model servers speak HTTP, vectors live in a gob file, PDFs are read with gojiberry's `pdftext`.
 
@@ -187,17 +187,20 @@ privately as described in [SECURITY.md](SECURITY.md).
 ## Licence
 
 talos's own source is released under the [MIT licence](LICENSE). It links the
-[`gojiberry`](https://github.com/elaous/gojiberry) module, which is licensed under the GNU AGPL-3.0. This is a
-summary, not legal advice.
+[`gojiberry`](https://github.com/elaous/gojiberry) and [`xango`](https://github.com/elaous/xango) modules, which are
+each licensed under the GNU AGPL-3.0. This is a summary, not legal advice.
 
-- A binary or container image that includes gojiberry (every build of talos does) is a combined work. It MUST be
-  conveyed under the AGPL-3.0, including its Corresponding Source.
+- A binary or container image that includes gojiberry or xango (every build of talos does) is a combined work. It MUST
+  be conveyed under the AGPL-3.0, including its Corresponding Source.
 - Running a modified version as a network service MUST offer that source to its users (AGPL-3.0 section 13).
-- gojiberry's NOTICE file and the licence notices MUST be kept. The credit "Made with the Gojiberry project,
-  github.com/elaous/gojiberry" MUST be honoured wherever the work shows its own notices to its users (gojiberry's
-  NOTICE, additional terms under AGPL-3.0 section 7(b)).
-- For use that does not fit the AGPL, see gojiberry's
-  [COMMERCIAL.md](https://github.com/elaous/gojiberry/blob/main/COMMERCIAL.md).
+- The NOTICE files of gojiberry and xango and the licence notices MUST be kept. The credit "Made with the Gojiberry
+  project, github.com/elaous/gojiberry" MUST be honoured wherever the work shows its own notices to its users
+  (gojiberry's NOTICE, additional terms under AGPL-3.0 section 7(b)). The credit "Made with the Xangô project,
+  github.com/elaous/xango" MUST be honoured in the same places (xango's NOTICE, additional terms under AGPL-3.0
+  section 7(b)).
+- For use that does not fit the AGPL, a commercial licence is available for each project: see gojiberry's
+  [COMMERCIAL.md](https://github.com/elaous/gojiberry/blob/main/COMMERCIAL.md) and xango's
+  [COMMERCIAL.md](https://github.com/elaous/xango/blob/main/COMMERCIAL.md).
 
 ## Layout
 

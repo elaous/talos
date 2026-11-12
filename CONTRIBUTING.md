@@ -10,8 +10,8 @@ accepted under the [MIT licence](LICENSE).
 
 ## Development setup
 
-talos needs Go 1.26+. Its dependencies on the public `gojiberry` and `xango` modules are fetched by the Go toolchain, so a fresh
-clone builds with no extra setup (see the README, "Dependencies on gojiberry and xango").
+talos needs Go 1.26+. Its dependencies on the public `gojiberry` and `xango` modules are fetched by the Go toolchain,
+so a fresh clone builds with no extra setup (see the README, "Dependencies on gojiberry and xango").
 
 ```bash
 make test                       # go vet + go test for all packages, and a WASM vet of ./ui
