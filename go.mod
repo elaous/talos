@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/elaous/gojiberry v0.1.2
 	github.com/elaous/xango v0.1.1
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -21,10 +21,10 @@ require (
 	github.com/signintech/gopdf v0.37.0 // indirect
 	github.com/zclconf/go-cty v1.16.3 // indirect
 	golang.org/x/image v0.44.0 // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/tools v0.51.0 // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
 )
 
 tool github.com/elaous/xango/cmd/xgc
